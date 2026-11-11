@@ -23,8 +23,9 @@ The PayPal checkout requires `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` from 
 
 1. Enter a fictional invoice text or use a sample. Extraction generates unconfirmed proposed fields.
 2. Check and edit those fields against a separately supplied expected order; submit them for deterministic review.
-3. A matching review records a receipt and stores the approved amount and EUR currency server-side. An optional sandbox order uses these values and ties the receipt to PayPal's custom_id.
-4. An explicit user approval in PayPal is required. The server checks the order status, reference, currency and amount before capture. Uncertain outcomes can block further attempts and require manual reconciliation.
+3. The optional comparison shows how two illustrative field changes affect the checks. It does not predict fraud or move money.
+4. A matching review records a receipt and stores the approved amount and EUR currency server-side. An optional sandbox order uses these values and ties the receipt to PayPal's custom_id.
+5. An explicit user approval in PayPal is required. The server checks the order status, reference, currency and amount before capture. Uncertain outcomes can block further attempts and require manual reconciliation.
 
 ## Limits
 

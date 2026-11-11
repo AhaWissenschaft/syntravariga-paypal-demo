@@ -62,6 +62,8 @@ Total Gross: 119.00 EUR</textarea>
   </div>
   <button type="submit">2. Run Deterministic Check & Record Receipt</button>
 </form>
+<button type="button" id="btn-compare" class="secondary">Show two illustrative changes</button>
+<pre id="comparison">Optional: compare how the checks react to different values. This does not create a payment.</pre>
 
 <h2>3. Review Result & PayPal Sandbox Checkout</h2>
 <pre id="result">Run deterministic check to evaluate fields.</pre>
@@ -138,6 +140,16 @@ document.querySelector('#btn-extract').addEventListener('click', async () => {
   } catch (e) {
     extractStatus.textContent = 'Extraction failed; please enter and verify fields manually.';
   }
+});
+
+document.querySelector('#btn-compare').addEventListener('click', async () => {
+  const view = document.querySelector('#comparison');
+  try {
+    const response = await fetch('/counterfactual', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(Object.fromEntries(new FormData(form)))});
+    if (!response.ok) throw Error();
+    const out = await response.json();
+    view.textContent = out.notice + '\n' + out.cases.map(c => `${c.label}: ${c.status} (${c.finding_codes.join(', ') || 'no listed discrepancies'})`).join('\n');
+  } catch (_) { view.textContent = 'Comparison unavailable.'; }
 });
 
 form.addEventListener('submit', async e => {

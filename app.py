@@ -8,6 +8,7 @@ import threading
 import urllib.parse
 
 from invoice_guard import analyze_invoice
+from counterfactual import compare_examples
 from ai_extractor import extract_invoice_fields
 from ai_explainer import explain_findings
 from aha_lab.contracts import sha256_value
@@ -106,7 +107,7 @@ class Handler(BaseHTTPRequestHandler):
         return value
 
     def do_POST(self):
-        if self.path not in ('/extract', '/review', '/explain', '/paypal/order', '/paypal/capture'):
+        if self.path not in ('/extract', '/review', '/counterfactual', '/explain', '/paypal/order', '/paypal/capture'):
             self.send_error(404)
             return
         try:
@@ -124,6 +125,8 @@ class Handler(BaseHTTPRequestHandler):
                             'scope': 'unconfirmed_proposal_only',
                         },
                     )
+            elif self.path == '/counterfactual':
+                result = compare_examples(data)
             elif self.path == '/explain':
                 receipt = data.get('receipt')
                 if not isinstance(receipt, dict) or not isinstance(receipt.get('index'), int) or not isinstance(receipt.get('event_hash'), str):
