@@ -90,13 +90,19 @@ def capture_order(order_id: str, receipt_hash: str, expected_amount: str | None 
         raise ValueError('Invalid expected amount')
 
     order = _request('GET', '/v2/checkout/orders/' + order_id)
-    units = order.get('purchase_units', [])
-    if order.get('status') != 'APPROVED' or not units or units[0].get('custom_id') != receipt_hash:
-        raise PayPalSandboxError('Order is not approved or receipt does not match', uncertain=False)
-    unit_amount = units[0].get('amount', {})
-    if expected_amount is not None:
-        if unit_amount.get('value') != expected_amount or unit_amount.get('currency_code') != currency:
-            raise PayPalSandboxError('Order amount or currency does not match approved review', uncertain=False)
+    try:
+        units = order['purchase_units']
+        if (order.get('id') != order_id or order.get('status') != 'APPROVED'
+                or not isinstance(units, list) or len(units) != 1
+                or units[0].get('custom_id') != receipt_hash):
+            raise ValueError('Order identity, approval or receipt does not match')
+        unit_amount = units[0]['amount']
+        if (expected_amount is None or currency != 'EUR'
+                or unit_amount.get('value') != expected_amount
+                or unit_amount.get('currency_code') != currency):
+            raise ValueError('Order amount or currency does not match approved review')
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
+        raise PayPalSandboxError('Order does not match the single approved review', uncertain=False) from exc
 
     result = _request(
         'POST',
@@ -105,7 +111,13 @@ def capture_order(order_id: str, receipt_hash: str, expected_amount: str | None 
         headers_extra={'PayPal-Request-Id': f'capture-{receipt_hash[:32]}', 'Prefer': 'return=representation'},
     )
     try:
-        capture = result['purchase_units'][0]['payments']['captures'][0]
+        units = result['purchase_units']
+        if not isinstance(units, list) or len(units) != 1:
+            raise ValueError('Unexpected capture purchase units')
+        captures = units[0]['payments']['captures']
+        if not isinstance(captures, list) or len(captures) != 1:
+            raise ValueError('Unexpected number of captures')
+        capture = captures[0]
         amount = capture['amount']
         if (result.get('id') != order_id or result.get('status') != 'COMPLETED'
                 or capture.get('status') != 'COMPLETED' or not capture.get('id')
