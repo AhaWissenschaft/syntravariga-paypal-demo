@@ -1,0 +1,8 @@
+{
+  "name": "SyntraVariga Invoice & Payment Guard",
+  "description": "Fictional invoice review and PayPal Sandbox demo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
