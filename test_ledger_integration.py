@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -51,6 +52,27 @@ class LedgerIntegrationTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as error:
             self.review()
         self.assertEqual(error.exception.code, 503)
+
+    def test_page_uses_server_paypal_client_id(self):
+        old=os.environ.get('PAYPAL_CLIENT_ID')
+        os.environ['PAYPAL_CLIENT_ID']='sandbox-client-example'
+        try:
+            with urllib.request.urlopen(f'http://127.0.0.1:{self.server.server_port}/') as response:
+                page=response.read().decode()
+            self.assertIn('client-id=sandbox-client-example',page)
+            self.assertNotIn('client-id=sb&',page)
+        finally:
+            if old is None: os.environ.pop('PAYPAL_CLIENT_ID',None)
+            else: os.environ['PAYPAL_CLIENT_ID']=old
+
+    def test_ledger_view_omits_unapproved_payload_fields(self):
+        self.review()
+        with urllib.request.urlopen(f'http://127.0.0.1:{self.server.server_port}/ledger') as response:
+            payload=json.load(response)
+        encoded=json.dumps(payload)
+        self.assertIn('finding_codes',encoded)
+        self.assertNotIn('Demo supplier',encoded)
+        self.assertNotIn('order_id',encoded)
 
 
 if __name__ == '__main__':

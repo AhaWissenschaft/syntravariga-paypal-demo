@@ -32,9 +32,26 @@ def analyze_invoice(data):
         findings.append({'code':'EXPECTED_AMOUNT_MISMATCH','field':'amount','message':'Invoice amount differs from the supplied expected amount.'})
     if all(amounts[k] is not None for k in ('net_amount','tax_amount','gross_amount')) and amounts['net_amount'] + amounts['tax_amount'] != amounts['gross_amount']:
         findings.append({'code':'TOTAL_MISMATCH','field':'gross_amount','message':'Net plus tax does not equal gross.'})
+    if amounts['amount'] is not None and amounts['gross_amount'] is not None and amounts['amount'] != amounts['gross_amount']:
+        findings.append({'code':'GROSS_AMOUNT_MISMATCH','field':'gross_amount','message':'Invoice amount does not equal gross amount.'})
     number=data.get('invoice_number','')
     number=number.strip() if isinstance(number,str) else ''
     if number and len(number)>100:
         findings.append({'code':'INVALID_INVOICE_NUMBER','field':'invoice_number','message':'Invoice number is too long.'})
+    explanation = 'No listed discrepancy. This only checks supplied fields; it does not prove invoice validity or payment safety.'
+    if findings:
+        details=[]
+        for item in findings:
+            if item['code']=='EXPECTED_AMOUNT_MISMATCH' and amounts['expected_amount'] is not None and amounts['amount'] is not None:
+                details.append(f"Invoice amount differs from expected amount by {amounts['amount']-amounts['expected_amount']:+.2f} EUR.")
+            elif item['code']=='TOTAL_MISMATCH' and all(amounts[k] is not None for k in ('net_amount','tax_amount','gross_amount')):
+                details.append(f"Net plus tax is {amounts['net_amount']+amounts['tax_amount']:.2f} EUR; stated gross is {amounts['gross_amount']:.2f} EUR.")
+            elif item['code']=='GROSS_AMOUNT_MISMATCH' and amounts['amount'] is not None and amounts['gross_amount'] is not None:
+                details.append(f"Invoice amount differs from gross by {amounts['amount']-amounts['gross_amount']:+.2f} EUR.")
+            elif item['code']=='VENDOR_MISMATCH':
+                details.append('Supplier text differs from the supplied expected supplier.')
+            else:
+                details.append(f"{item['field']}: {item['message']}")
+        explanation=' '.join(details)+' Review manually; findings do not establish fraud or payment safety.'
     return {'status':'REVIEW_REQUIRED' if findings else 'FIELDS_CONSISTENT', 'findings':findings,
-            'explanation': 'Review the listed arithmetic and supplied-field comparisons manually. Consistency does not establish invoice validity or payment safety.'}
+            'explanation': explanation}

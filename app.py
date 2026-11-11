@@ -5,18 +5,32 @@ import json
 import os
 from pathlib import Path
 import threading
+import urllib.parse
 from invoice_guard import analyze_invoice
 from aha_lab.ledger import append_event, read_events, verify_ledger, LedgerError
 
-PAGE = Path(__file__).with_name('index.html').read_bytes()
+PAGE_TEMPLATE = Path(__file__).with_name('index.html').read_text(encoding='utf-8')
 LEDGER_PATH = Path(os.environ.get('SYNTRA_DEMO_LEDGER', '/tmp/syntravariga_paypal_demo.jsonl'))
 LEDGER_LOCK = threading.Lock()
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path != '/':
-            self.send_error(404); return
-        self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(PAGE)
+        if self.path == '/':
+            client_id=urllib.parse.quote(os.environ.get('PAYPAL_CLIENT_ID','sb').strip() or 'sb',safe='')
+            page=PAGE_TEMPLATE.replace('client-id=sb',f'client-id={client_id}').encode('utf-8')
+            self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(page); return
+        if self.path == '/ledger':
+            try:
+                with LEDGER_LOCK:
+                    report=verify_ledger(LEDGER_PATH)
+                    events=read_events(LEDGER_PATH)
+                payload={'verification':{'status':report['status'],'event_count':report['event_count'],'head_hash':report['head_hash'],'errors':report['errors']},
+                         'events':[{'index':e.get('index'),'event_type':e.get('event_type'),'timestamp':e.get('timestamp'),'event_hash':e.get('event_hash'),'payload':{k:v for k,v in e.get('payload',{}).items() if k in ('finding_codes','status','scope','paypal_status','receipt_hash')}} for e in events]}
+                body=json.dumps(payload).encode('utf-8')
+                self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(body); return
+            except (OSError,LedgerError):
+                self.send_error(503,'Ledger invalid or unreadable'); return
+        self.send_error(404)
 
     def _body(self, limit=8192):
         length=int(self.headers.get('Content-Length','0'))

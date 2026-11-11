@@ -7,7 +7,7 @@ A local demonstration of deterministic invoice-field checks, a hash-chained revi
 ## Checks
 
 - Supplier text against the expected supplier text supplied by the user.
-- Invoice amount against the expected amount supplied by the user.
+- Invoice amount against expected amount and gross amount supplied by the user.
 - Whether net plus tax equals gross.
 - Presence and basic length of an invoice number.
 
@@ -15,9 +15,9 @@ A consistent result means only that entered fields pass these checks. It does no
 
 ## PayPal Sandbox flow
 
-When the checks return FIELDS_CONSISTENT, the page presents the PayPal JavaScript SDK Sandbox button. The server verifies the SyntraVariga ledger receipt before creating a EUR 1.00 test order and puts its SHA-256 event hash in PayPal custom_id. Before capture, the server retrieves the order and checks APPROVED status and receipt reference. It records a capture only when PayPal returns COMPLETED.
+Set PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET for the same PayPal Sandbox app. The server inserts the public client ID into the browser SDK at request time; the client secret remains server-side. When checks return FIELDS_CONSISTENT, the page presents the PayPal Sandbox button. The server verifies the SyntraVariga ledger receipt before creating a EUR 1.00 test order, then stores the event hash in PayPal custom_id. Before capture, it retrieves the order and checks APPROVED status and the matching receipt reference. It records a capture only when PayPal returns COMPLETED.
 
-No successful PayPal transaction is claimed. Server REST credentials are read from PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET environment variables. Never put the secret in the browser or commit it. PAYPAL_API_BASE is restricted to PayPal Sandbox. Use test accounts only.
+No successful PayPal transaction is claimed. PAYPAL_API_BASE is restricted to PayPal Sandbox. Never put the secret in the browser or commit it. Use test accounts only.
 
 ## Run locally
 
@@ -25,7 +25,7 @@ Tested with Python 3.12.14 on Linux. No extra Python packages required. Set Sand
 
     python app.py
 
-Open http://127.0.0.1:8787 and use fictional data.
+Open http://127.0.0.1:8787 and use fictional data. The /ledger view shows only event metadata and selected finding/status fields; it omits invoice content and PayPal order IDs.
 
 Run tests:
 

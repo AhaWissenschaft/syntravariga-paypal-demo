@@ -13,5 +13,10 @@ class InvoiceTests(unittest.TestCase):
   x=valid();x['invoice_number']='';x['amount']='NaN';self.assertEqual(analyze_invoice(x)['status'],'REVIEW_REQUIRED')
  def test_negative_amount_fails_closed(self):
   x=valid();x['amount']='-1';self.assertIn('INVALID_AMOUNT',[f['code'] for f in analyze_invoice(x)['findings']])
+ def test_invoice_amount_must_match_gross(self):
+  x=valid();x['amount']='119';x['gross_amount']='500'
+  result=analyze_invoice(x)
+  self.assertIn('GROSS_AMOUNT_MISMATCH',[f['code'] for f in result['findings']])
+  self.assertIn('381.00 EUR',result['explanation'])
 
 if __name__=='__main__': unittest.main()
