@@ -1,12 +1,200 @@
 <!doctype html>
-<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SyntraVariga Rechnungsprüfung – Sandbox</title><style>body{font:16px system-ui;max-width:820px;margin:2rem auto;padding:0 1rem;background:#f4f6fa;color:#182332}main{background:white;padding:1.5rem;border-radius:12px}label{display:block;font-weight:600;margin:1rem 0 .3rem}input{width:100%;box-sizing:border-box;padding:.7rem;font:inherit}button{padding:.7rem 1rem;background:#164b91;color:white;border:0;border-radius:6px;margin-top:1rem}pre{padding:1rem;background:#eff3fa;white-space:pre-wrap;overflow-wrap:anywhere}.note{color:#6b4a00;background:#fff3ce;padding:1rem}</style></head><body><main>
-<h1>SyntraVariga – Rechnungsprüfung</h1><p>AhaWissenschaft · PayPal Sandbox</p>
-<p class="note">Demo mit erfundenen Angaben. Die Regeln prüfen eingegebene Felder und Rechenwege. Sie bestätigen weder Echtheit noch Betrugsfreiheit. Eine Sandbox-Zahlung wird nur durch deinen Klick auf PayPal ausgelöst.</p>
-<form id="review"><label>Erwarteter Lieferant<input name="expected_vendor" value="Demo GmbH" required></label><label>Lieferant auf Rechnung<input name="vendor" value="Demo GmbH" required></label><label>Erwarteter Betrag (EUR)<input name="expected_amount" value="119.00" required></label><label>Rechnungsbetrag (EUR)<input name="amount" value="119.00" required></label><label>Netto (EUR)<input name="net_amount" value="100.00" required></label><label>Steuer (EUR)<input name="tax_amount" value="19.00" required></label><label>Brutto (EUR)<input name="gross_amount" value="119.00" required></label><label>Rechnungsnummer<input name="invoice_number" value="DEMO-001" required></label><button>Felder prüfen</button></form>
-<pre id="result">Prüfung starten.</pre><div id="paypal-button-container"></div><p id="payment-status"></p><h2>Prüfprotokoll</h2><button id="refresh-ledger" type="button">Protokoll aktualisieren</button><pre id="ledger">Noch keine Einträge.</pre>
-</main><script src="https://www.paypal.com/sdk/js?client-id=sb&currency=EUR&intent=capture"></script><script>
-let receipt=null;const form=document.querySelector('#review'),result=document.querySelector('#result'),status=document.querySelector('#payment-status'),box=document.querySelector('#paypal-button-container'),ledger=document.querySelector('#ledger');
-async function refreshLedger(){try{const r=await fetch('/ledger',{cache:'no-store'});if(!r.ok)throw Error();ledger.textContent=JSON.stringify(await r.json(),null,2);}catch(e){ledger.textContent='Prüfprotokoll gerade nicht verfügbar.';}}
-document.querySelector('#refresh-ledger').addEventListener('click',refreshLedger);form.addEventListener('input',()=>{receipt=null;box.replaceChildren();status.textContent='';});
-form.addEventListener('submit',async e=>{e.preventDefault();receipt=null;box.replaceChildren();status.textContent='';try{const data=Object.fromEntries(new FormData(form));const r=await fetch('/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});if(!r.ok)throw Error();const v=await r.json();result.textContent=v.status+'\n'+v.explanation+'\n'+(v.findings.length?v.findings.map(x=>x.code+': '+x.message).join('\n'):'Keine Abweichung in den geprüften Eingabefeldern.')+'\nLedger-Beleg: '+v.receipt.event_hash;receipt=v.receipt;await refreshLedger();if(v.status==='FIELDS_CONSISTENT'&&window.paypal){paypal.Buttons({createOrder:async()=>{const x=await fetch('/paypal/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({receipt})});if(!x.ok)throw Error();const order=await x.json();await refreshLedger();return order.id;},onApprove:async(data)=>{const x=await fetch('/paypal/capture',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({receipt,order_id:data.orderID})});if(!x.ok)throw Error();const out=await x.json();status.textContent='Sandbox-Status: '+out.status+' · Transaktion: '+(out.purchase_units?.[0]?.payments?.captures?.[0]?.id||out.id);await refreshLedger();},onError:()=>{status.textContent='Sandbox-Ablauf fehlgeschlagen; bitte Status prüfen.';}}).render('#paypal-button-container');}}catch(err){result.textContent='Prüfung oder Sandbox-Anfrage fehlgeschlagen.';}});refreshLedger();
-</script></body></html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SyntraVariga Invoice & Payment Guard — PayPal Sandbox Demo</title>
+<style>
+body{font:15px/1.5 system-ui,-apple-system,sans-serif;max-width:960px;margin:1.5rem auto;padding:0 1rem;background:#f4f6fa;color:#182332}
+main{background:#fff;padding:1.5rem;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+h1{margin:0 0 .2rem;font-size:1.5rem}
+h2{margin:1.5rem 0 .6rem;font-size:1.15rem;border-bottom:1px solid #e2e8f0;padding-bottom:.3rem}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+@media(max-width:700px){.grid{grid-template-columns:1fr}}
+label{display:block;font-weight:600;margin:.7rem 0 .25rem;font-size:.9rem}
+input,textarea{width:100%;box-sizing:border-box;padding:.55rem;font:inherit;border:1px solid #cbd5e1;border-radius:6px}
+button{padding:.6rem 1rem;background:#164b91;color:#fff;border:0;border-radius:6px;margin-top:.6rem;cursor:pointer;font-weight:600}
+button.secondary{background:#475569;margin-right:.4rem;font-size:.85rem;padding:.45rem .75rem}
+pre{padding:.85rem;background:#eff3fa;border-radius:6px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:.85rem}
+.note{color:#6b4a00;background:#fff3ce;padding:.85rem;border-radius:6px;margin:.8rem 0;font-size:.9rem}
+.badge{display:inline-block;padding:.2rem .5rem;border-radius:4px;font-size:.8rem;font-weight:700;background:#e2e8f0}
+</style>
+</head>
+<body>
+<main>
+<h1>SyntraVariga — Invoice & Payment Guard</h1>
+<p><strong>AhaWissenschaft · SyntraVariga</strong> · PayPal Sandbox Prototype</p>
+<p class="note"><strong>Sandbox Demo & Boundaries:</strong> Use fictional data only. AI extraction proposes candidate fields that require human verification. Deterministic rules compare entered fields and arithmetic only; they do not establish invoice authenticity, supplier identity, or fraud prevention. When an external AI API key is configured, the entered fictional invoice text is sent to that provider.</p>
+
+<h2>1. Unstructured Invoice Text & AI Proposal</h2>
+<div>
+  <button type="button" class="secondary" id="preset-ok">Load Sample A: Consistent (119.00 EUR)</button>
+  <button type="button" class="secondary" id="preset-mismatch">Load Sample B: Price Discrepancy (149.00 EUR)</button>
+  <button type="button" class="secondary" id="preset-ambiguous">Load Sample C: Ambiguous Totals</button>
+</div>
+<label>Fictional Incoming Invoice Text
+  <textarea id="invoice-text" rows="5">Invoice No: DEMO-001
+Supplier: Demo GmbH
+Net: 100.00 EUR
+Tax: 19.00 EUR
+Total Gross: 119.00 EUR</textarea>
+</label>
+<button type="button" id="btn-extract">1. Propose Fields from Text</button>
+<pre id="extract-status">Click "Propose Fields from Text" or enter values manually below.</pre>
+
+<h2>2. Human Verification & Deterministic Review</h2>
+<form id="review">
+  <div class="grid">
+    <div>
+      <strong>Expected Order (Reference)</strong>
+      <label>Expected Supplier<input name="expected_vendor" value="Demo GmbH" required></label>
+      <label>Expected Gross Amount (EUR)<input name="expected_amount" value="119.00" required></label>
+    </div>
+    <div>
+      <strong>Confirmed Invoice Fields (Human-Editable)</strong>
+      <label>Supplier on Invoice<input name="vendor" value="Demo GmbH" required></label>
+      <label>Invoice Number<input name="invoice_number" value="DEMO-001" required></label>
+      <label>Invoice Amount (EUR)<input name="amount" value="119.00" required></label>
+      <label>Net (EUR)<input name="net_amount" value="100.00" required></label>
+      <label>Tax (EUR)<input name="tax_amount" value="19.00" required></label>
+      <label>Gross (EUR)<input name="gross_amount" value="119.00" required></label>
+    </div>
+  </div>
+  <button type="submit">2. Run Deterministic Check & Record Receipt</button>
+</form>
+
+<h2>3. Review Result & PayPal Sandbox Checkout</h2>
+<pre id="result">Run deterministic check to evaluate fields.</pre>
+<div id="paypal-button-container"></div>
+<p id="payment-status"></p>
+
+<h2>4. Hash-Chained Review Log (/ledger)</h2>
+<button id="refresh-ledger" type="button" class="secondary">Refresh Log</button>
+<pre id="ledger">Loading log...</pre>
+</main>
+
+<script src="https://www.paypal.com/sdk/js?client-id=sb&currency=EUR&intent=capture"></script>
+<script>
+let receipt = null;
+let editVersion = 0;
+const form = document.querySelector('#review');
+const result = document.querySelector('#result');
+const status = document.querySelector('#payment-status');
+const box = document.querySelector('#paypal-button-container');
+const ledger = document.querySelector('#ledger');
+const extractStatus = document.querySelector('#extract-status');
+const invoiceText = document.querySelector('#invoice-text');
+
+const SAMPLES = {
+  ok: "Invoice No: DEMO-001\nSupplier: Demo GmbH\nNet: 100.00 EUR\nTax: 19.00 EUR\nTotal Gross: 119.00 EUR",
+  mismatch: "Invoice No: DEMO-002\nSupplier: Demo GmbH\nNet: 125.21 EUR\nTax: 23.79 EUR\nTotal Gross: 149.00 EUR",
+  ambiguous: "Invoice No: DEMO-003\nSupplier: Demo GmbH\nNet: 100.00 EUR\nTax: 19.00 EUR\nTotal Gross: 119.00 EUR\nAmount due with early discount: 116.62 EUR"
+};
+
+function invalidateReceipt() {
+  editVersion += 1;
+  receipt = null;
+  box.replaceChildren();
+  status.textContent = '';
+}
+
+document.querySelector('#preset-ok').addEventListener('click', () => { invoiceText.value = SAMPLES.ok; invalidateReceipt(); });
+document.querySelector('#preset-mismatch').addEventListener('click', () => { invoiceText.value = SAMPLES.mismatch; invalidateReceipt(); });
+document.querySelector('#preset-ambiguous').addEventListener('click', () => { invoiceText.value = SAMPLES.ambiguous; invalidateReceipt(); });
+
+async function refreshLedger() {
+  try {
+    const r = await fetch('/ledger', {cache: 'no-store'});
+    if (!r.ok) throw Error();
+    ledger.textContent = JSON.stringify(await r.json(), null, 2);
+  } catch (e) {
+    ledger.textContent = 'Review log currently unavailable.';
+  }
+}
+
+document.querySelector('#refresh-ledger').addEventListener('click', refreshLedger);
+form.addEventListener('input', invalidateReceipt);
+invoiceText.addEventListener('input', invalidateReceipt);
+
+document.querySelector('#btn-extract').addEventListener('click', async () => {
+  invalidateReceipt();
+  const requestVersion = editVersion;
+  extractStatus.textContent = 'Extracting candidate fields...';
+  try {
+    const r = await fetch('/extract', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({invoice_text: invoiceText.value})
+    });
+    if (!r.ok) throw Error();
+    const out = await r.json();
+    if (requestVersion !== editVersion) return;
+    for (const [k, v] of Object.entries(out.proposed_fields || {})) {
+      if (form.elements[k]) form.elements[k].value = v;
+    }
+    extractStatus.textContent =
+      `Mode: ${out.mode}\nNotice: ${out.provider_notice}\nWarnings: ${(out.warnings || []).join(', ') || 'None'}`;
+    await refreshLedger();
+  } catch (e) {
+    extractStatus.textContent = 'Extraction failed; please enter and verify fields manually.';
+  }
+});
+
+form.addEventListener('submit', async e => {
+  e.preventDefault();
+  invalidateReceipt();
+  const requestVersion = editVersion;
+  try {
+    const data = Object.fromEntries(new FormData(form));
+    const r = await fetch('/review', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data)
+    });
+    if (!r.ok) throw Error();
+    const v = await r.json();
+    if (requestVersion !== editVersion) return;
+    result.textContent =
+      `${v.status}\n${v.explanation}\n` +
+      (v.findings.length ? v.findings.map(x => `${x.code}: ${x.message}`).join('\n') : 'No discrepancy in checked fields.') +
+      `\nApproved Sandbox Amount: ${v.approved_amount ? v.approved_amount + ' ' + v.currency : 'Blocked'}` +
+      `\nLedger Receipt: ${v.receipt.event_hash}`;
+    receipt = v.receipt;
+    await refreshLedger();
+    if (v.status === 'FIELDS_CONSISTENT' && window.paypal) {
+      paypal.Buttons({
+        createOrder: async () => {
+          const x = await fetch('/paypal/order', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({receipt})
+          });
+          if (!x.ok) throw Error();
+          const order = await x.json();
+          await refreshLedger();
+          return order.id;
+        },
+        onApprove: async (data) => {
+          const x = await fetch('/paypal/capture', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({receipt, order_id: data.orderID})
+          });
+          if (!x.ok) throw Error();
+          const out = await x.json();
+          status.textContent = 'Sandbox Status: ' + out.status + ' · Transaction: ' + (out.purchase_units?.[0]?.payments?.captures?.[0]?.id || out.id);
+          await refreshLedger();
+        },
+        onError: () => {
+          status.textContent = 'Sandbox flow failed or status uncertain; check ledger and PayPal Sandbox.';
+        }
+      }).render('#paypal-button-container');
+    }
+  } catch (err) {
+    result.textContent = 'Review or Sandbox request failed.';
+  }
+});
+refreshLedger();
+</script>
+</body>
+</html>

@@ -20,3 +20,4 @@ class InvoiceTests(unittest.TestCase):
   self.assertIn('381.00 EUR',result['explanation'])
 
 if __name__=='__main__': unittest.main()
+

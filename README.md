@@ -1,38 +1,35 @@
-# SyntraVariga PayPal Demo
+# SyntraVariga Invoice & Payment Guard
 
-**AhaWissenschaft · SyntraVariga**
+AhaWissenschaft · SyntraVariga
 
-A local demonstration of deterministic invoice-field checks, a hash-chained review log, and optional PayPal Sandbox checkout. Experimental prototype, not a fraud detector or production payment control.
+Experimental local prototype. It proposes fields from fictional invoice text, compares user-confirmed fields with expected order data and offers a PayPal Sandbox-only checkout. It is not a fraud detector, identity check, production payment system or proof that an invoice is authentic.
 
-## Checks
+## Status
 
-- Supplier text against the expected supplier text supplied by the user.
-- Invoice amount against expected amount and gross amount supplied by the user.
-- Whether net plus tax equals gross.
-- Presence and basic length of an invoice number.
+Local automated tests pass with mocked payment/AI responses. A live AI call and an end-to-end PayPal Sandbox transaction have **not** been verified. The extraction fallback is deterministic and is not AI. The model provider determines charges: do not enable external calls without verifying cost and data terms. This project is not yet a verified contest submission.
 
-A consistent result means only that entered fields pass these checks. It does not establish that a document, supplier, tax treatment, or invoice is authentic, or that a payment is safe. A person decides whether to proceed.
+## Run
 
-## PayPal Sandbox flow
+Tested in Linux with Python 3.12. No additional Python packages are required.
 
-Set PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET for the same PayPal Sandbox app. The server inserts the public client ID into the browser SDK at request time; the client secret remains server-side. When checks return FIELDS_CONSISTENT, the page presents the PayPal Sandbox button. The server verifies the SyntraVariga ledger receipt before creating a EUR 1.00 test order, then stores the event hash in PayPal custom_id. Before capture, it retrieves the order and checks APPROVED status and the matching receipt reference. It records a capture only when PayPal returns COMPLETED.
-
-No successful PayPal transaction is claimed. PAYPAL_API_BASE is restricted to PayPal Sandbox. Never put the secret in the browser or commit it. Use test accounts only.
-
-## Run locally
-
-Tested with Python 3.12.14 on Linux. No extra Python packages required. Set Sandbox credentials in the environment, then run:
-
+    python -m unittest discover -v
     python app.py
 
-Open http://127.0.0.1:8787 and use fictional data. The /ledger view shows only event metadata and selected finding/status fields; it omits invoice content and PayPal order IDs.
+Open http://127.0.0.1:8787. Use fictional data only. The app listens on loopback and is not suitable for public deployment. The extraction and explanation functions default to local fallback. To enable external AI, explicitly set `SYNTRA_ALLOW_EXTERNAL_AI=1` and configure the relevant provider key; entered invoice text is sent to the configured provider for extraction. The model's output requires human review. Do not enter secrets in source code or commit them.
 
-Run tests:
+The PayPal checkout requires `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` from the same **Sandbox** application and a separate Sandbox buyer account. Use test accounts only. The application server enforces the PayPal Sandbox API host. A successful payment is not claimed.
 
-    python -m unittest -v test_invoice test_ledger_integration
+## Intended flow
 
-## Ledger and limits
+1. Enter a fictional invoice text or use a sample. Extraction generates unconfirmed proposed fields.
+2. Check and edit those fields against a separately supplied expected order; submit them for deterministic review.
+3. A matching review records a receipt and stores the approved amount and EUR currency server-side. An optional sandbox order uses these values and ties the receipt to PayPal's custom_id.
+4. An explicit user approval in PayPal is required. The server checks the order status, reference, currency and amount before capture. Uncertain outcomes can block further attempts and require manual reconciliation.
 
-The local ledger stores finding codes and result status, not invoice fields. A hash chain detects changes to entries when verified; hashes do not prove truth, identity, authorization, or payment. Someone able to rewrite the whole file can recompute it unless its head hash is preserved elsewhere. The lock coordinates threads in one process only. The default log path is temporary (/tmp).
+## Limits
 
-The user must click the Sandbox button. This prototype has no production deployment, real-money flow, or external transaction validation.
+The locally generated receipt is a checksum-based reference, not proof of invoice truth, identity or authorization. A hash chain can be recomputed by a party with access to the files. Its unsalted amount commitment does not conceal a low-entropy amount from guessing. SQLite stores the approved amount in clear text; ledger and database live in local temporary storage by default. The ledger lock applies to a single server process; do not run multiple instances sharing it. A SQLite reservation guards simultaneous attempts for a single receipt; it does not deduplicate newly created reviews of the same invoice or guarantee exactly-once processing across crashes. No credentials are shipped in this repository.
+
+## Competition and attribution
+
+The project combines an existing SyntraVariga hash-chain component with an experimental invoice checking and Sandbox checkout demo. Exact prior creation dates and competition eligibility must be substantiated. The contest requires meaningful PayPal and AI use, a working demo, open-source repository and a YouTube demo; see https://paypalaihackathon.devpost.com/rules . This repository does not claim a verified real AI call, a completed Sandbox payment, contest submission or prize.
