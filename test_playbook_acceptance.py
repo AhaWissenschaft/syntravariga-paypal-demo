@@ -90,6 +90,22 @@ class PlaybookAcceptanceTests(unittest.TestCase):
                 self._post('/paypal/capture', {'receipt': receipt, 'order_id': 'ORDER-ABC123'})
             self.assertEqual(err2.exception.code, 409)
 
+    def test_uncertain_order_timeout_blocks_blind_retry(self):
+        review = self._post('/review', {
+            'expected_vendor': 'Demo GmbH', 'vendor': 'Demo GmbH',
+            'expected_amount': '119.00', 'amount': '119.00',
+            'net_amount': '100.00', 'tax_amount': '19.00',
+            'gross_amount': '119.00', 'invoice_number': 'INV-119',
+        })
+        receipt = review['receipt']
+        with patch('paypal_sandbox.create_order', side_effect=PayPalSandboxError('Timeout', uncertain=True)):
+            with self.assertRaises(urllib.error.HTTPError) as first:
+                self._post('/paypal/order', {'receipt': receipt})
+            self.assertEqual(first.exception.code, 502)
+            with self.assertRaises(urllib.error.HTTPError) as retry:
+                self._post('/paypal/order', {'receipt': receipt})
+            self.assertEqual(retry.exception.code, 409)
+
     def test_uncertain_capture_timeout_blocks_blind_retry(self):
         review = self._post('/review', {
             'expected_vendor': 'Demo GmbH', 'vendor': 'Demo GmbH',

@@ -102,7 +102,7 @@ def _call_gemini(text: str, api_key: str) -> dict:
 def _call_anthropic(text: str, api_key: str) -> dict:
     url = "https://api.anthropic.com/v1/messages"
     payload = {
-        "model": os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-latest"),
+        "model": os.environ.get("AI_MODEL", "claude-sonnet-5-5"),
         "max_tokens": 400,
         "temperature": 0.0,
         "system": SYSTEM_PROMPT,
