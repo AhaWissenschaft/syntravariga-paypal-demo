@@ -36,6 +36,26 @@ class PlaybookAcceptanceTests(unittest.TestCase):
         with urllib.request.urlopen(req) as resp:
             return json.load(resp)
 
+    def test_cross_origin_request_is_rejected(self):
+        req = urllib.request.Request(
+            f'http://127.0.0.1:{self.server.server_port}/extract',
+            data=json.dumps({'invoice_text':'Total: 119.00'}).encode(),
+            headers={'Content-Type':'application/json', 'Origin':'https://example.com'},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(req)
+        self.assertEqual(error.exception.code, 400)
+
+    def test_plain_text_request_is_rejected(self):
+        req = urllib.request.Request(
+            f'http://127.0.0.1:{self.server.server_port}/extract',
+            data=b'{"invoice_text":"Total: 119.00"}',
+            headers={'Content-Type':'text/plain'},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(req)
+        self.assertEqual(error.exception.code, 400)
+
     def test_ai_extractor_flags_ambiguous_amounts_and_blocks_expected_fields(self):
         text = (
             "Invoice No: INV-99\nSupplier: Demo GmbH\nNet: 100.00\nTax: 19.00\n"

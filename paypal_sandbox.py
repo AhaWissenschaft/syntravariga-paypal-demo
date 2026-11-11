@@ -102,8 +102,15 @@ def capture_order(order_id: str, receipt_hash: str, expected_amount: str | None 
         'POST',
         '/v2/checkout/orders/' + order_id + '/capture',
         {},
-        headers_extra={'PayPal-Request-Id': f'capture-{receipt_hash[:32]}'},
+        headers_extra={'PayPal-Request-Id': f'capture-{receipt_hash[:32]}', 'Prefer': 'return=representation'},
     )
-    if result.get('status') != 'COMPLETED':
-        raise PayPalSandboxError('Sandbox capture was not completed', uncertain=True)
+    try:
+        capture = result['purchase_units'][0]['payments']['captures'][0]
+        amount = capture['amount']
+        if (result.get('id') != order_id or result.get('status') != 'COMPLETED'
+                or capture.get('status') != 'COMPLETED' or not capture.get('id')
+                or amount.get('value') != expected_amount or amount.get('currency_code') != currency):
+            raise ValueError('capture details do not match')
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
+        raise PayPalSandboxError('Capture response unverified; reconciliation required', uncertain=True) from exc
     return result

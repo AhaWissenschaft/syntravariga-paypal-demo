@@ -33,7 +33,14 @@ def _db_path() -> Path:
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _valid_host(self):
+        host = self.headers.get('Host', '')
+        return host in {f'127.0.0.1:{self.server.server_address[1]}', f'localhost:{self.server.server_address[1]}'}
+
     def do_GET(self):
+        if not self._valid_host():
+            self.send_error(400, 'Invalid host')
+            return
         if self.path == '/':
             client_id = urllib.parse.quote(os.environ.get('PAYPAL_CLIENT_ID', 'sb').strip() or 'sb', safe='')
             page = PAGE_TEMPLATE.replace('client-id=sb', f'client-id={client_id}').encode('utf-8')
@@ -82,6 +89,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def _body(self, limit=8192):
+        if self.headers.get_content_type() != 'application/json':
+            raise ValueError('application/json required')
+        host = self.headers.get('Host', '')
+        if not self._valid_host():
+            raise ValueError('invalid host')
+        origin = self.headers.get('Origin')
+        if origin and origin != 'http://' + host:
+            raise ValueError('invalid origin')
         length = int(self.headers.get('Content-Length', '0'))
         if length <= 0 or length > limit:
             raise ValueError('size')
@@ -188,7 +203,9 @@ class Handler(BaseHTTPRequestHandler):
                         raise LedgerError('amount commitment mismatch')
                     try:
                         result = create_order(receipt['event_hash'], session['approved_amount'], session['currency'])
-                        complete_order_creation(_db_path(), receipt['event_hash'], result.get('id', ''))
+                        if not isinstance(result, dict) or result.get('status') != 'CREATED' or not isinstance(result.get('id'), str) or not result['id']:
+                            raise PayPalSandboxError('Unexpected order response', uncertain=True)
+                        complete_order_creation(_db_path(), receipt['event_hash'], result['id'])
                     except Exception:
                         # Keep ORDER_PENDING: an order may exist after a lost response.
                         raise
