@@ -168,13 +168,13 @@ export const LedgerExplorerView: React.FC<LedgerExplorerViewProps> = ({
         {/* Head Hash & Genesis Info */}
         <div className="mt-4 pt-3 border-t border-slate-800/80 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono text-slate-400">
           <div>
-            <span className="text-slate-500">HEAD HASH: </span>
+            <span className="text-slate-400">HEAD HASH: </span>
             <span className="text-indigo-400 select-all">
               {verificationReport.head_hash.substring(0, 32)}...
             </span>
           </div>
           <div className="sm:text-right">
-            <span className="text-slate-500">GENESIS: </span>
+            <span className="text-slate-400">GENESIS: </span>
             <span className="text-slate-400">64x 0x00</span>
           </div>
         </div>
@@ -182,14 +182,14 @@ export const LedgerExplorerView: React.FC<LedgerExplorerViewProps> = ({
 
       {/* Interactive Tamper Simulation Box */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <Flame className="w-4 h-4 text-amber-400" />
+            <Flame className="w-4 h-4 text-amber-400" aria-hidden="true" />
             <h4 className="text-xs font-semibold uppercase tracking-wider font-mono text-slate-200">
               In-Browser Hash-Chain Tamper Simulation (UI Verification Demo)
             </h4>
           </div>
-          <span className="text-xs font-mono text-slate-500">
+          <span className="text-xs font-mono text-slate-400">
             Client-Memory Simulation Only (Does Not Modify Disk Ledger)
           </span>
         </div>
@@ -203,7 +203,7 @@ export const LedgerExplorerView: React.FC<LedgerExplorerViewProps> = ({
             type="button"
             onClick={() => handleTamperPayload(0)}
             disabled={events.length === 0}
-            className="px-3 py-1.5 rounded bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-800 text-xs font-mono transition disabled:opacity-50"
+            className="px-3 py-1.5 rounded bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-800 text-xs font-mono transition disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400"
           >
             Simulate Payload Mutation in Block #1
           </button>
@@ -211,7 +211,7 @@ export const LedgerExplorerView: React.FC<LedgerExplorerViewProps> = ({
             type="button"
             onClick={() => handleTamperHashChain(events.length - 1)}
             disabled={events.length <= 1}
-            className="px-3 py-1.5 rounded bg-amber-950/80 hover:bg-amber-900 text-amber-300 border border-amber-800 text-xs font-mono transition disabled:opacity-50"
+            className="px-3 py-1.5 rounded bg-amber-950/80 hover:bg-amber-900 text-amber-300 border border-amber-800 text-xs font-mono transition disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
           >
             Simulate Broken Previous-Hash Link
           </button>
@@ -225,7 +225,7 @@ export const LedgerExplorerView: React.FC<LedgerExplorerViewProps> = ({
         </h4>
 
         {events.length === 0 ? (
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-8 text-center text-slate-500 font-mono text-xs">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-8 text-center text-slate-400 font-mono text-xs">
             The ledger is empty. Run an invoice verification to create sealed audit entries.
           </div>
         ) : (
@@ -237,17 +237,19 @@ export const LedgerExplorerView: React.FC<LedgerExplorerViewProps> = ({
                 key={event.event_id + index}
                 className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden transition"
               >
-                {/* Event Summary Row */}
-                <div
+                {/* Keyboard-Accessible Event Summary Row */}
+                <button
+                  type="button"
+                  aria-expanded={isExpanded}
                   onClick={() => setExpandedIndex(isExpanded ? null : index)}
-                  className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 cursor-pointer hover:bg-slate-850/50"
+                  className="w-full text-left p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 cursor-pointer hover:bg-slate-800/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-400"
                 >
                   <div className="flex items-center gap-3">
-                    <span className="w-8 h-8 rounded-lg bg-indigo-950 border border-indigo-500/30 text-indigo-400 font-mono font-bold text-xs flex items-center justify-center">
+                    <span className="w-8 h-8 rounded-lg bg-indigo-950 border border-indigo-500/30 text-indigo-400 font-mono font-bold text-xs flex items-center justify-center shrink-0">
                       #{event.index}
                     </span>
                     <div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="font-mono font-semibold text-white text-xs">
                           {event.event_id}
                         </span>
@@ -256,7 +258,7 @@ export const LedgerExplorerView: React.FC<LedgerExplorerViewProps> = ({
                         </span>
                       </div>
                       <div className="flex items-center gap-2 text-[11px] font-mono text-slate-400 mt-0.5">
-                        <Clock className="w-3 h-3 text-slate-500" />
+                        <Clock className="w-3 h-3 text-slate-400" aria-hidden="true" />
                         <span>{event.timestamp}</span>
                       </div>
                     </div>
@@ -264,23 +266,24 @@ export const LedgerExplorerView: React.FC<LedgerExplorerViewProps> = ({
 
                   <div className="flex items-center gap-2 sm:text-right">
                     <div className="text-[11px] font-mono text-slate-400 hidden md:block">
-                      <span className="text-slate-500">Hash: </span>
+                      <span className="text-slate-400">Hash: </span>
                       <span className="text-slate-300">{event.event_hash.substring(0, 16)}...</span>
                     </div>
                     <ChevronRight
-                      className={`w-4 h-4 text-slate-500 transition-transform ${
+                      aria-hidden="true"
+                      className={`w-4 h-4 text-slate-400 transition-transform ${
                         isExpanded ? 'rotate-90' : ''
                       }`}
                     />
                   </div>
-                </div>
+                </button>
 
                 {/* Expanded Details */}
                 {isExpanded && (
                   <div className="p-4 border-t border-slate-800 bg-slate-950/70 space-y-3 font-mono text-xs">
                     <div className="space-y-1">
                       <div className="flex items-center justify-between">
-                        <span className="text-slate-500 text-[11px]">EVENT SHA-256 HASH:</span>
+                        <span className="text-slate-400 text-[11px]">EVENT SHA-256 HASH:</span>
                         <button
                           type="button"
                           onClick={() => handleCopy(event.event_hash)}
@@ -301,10 +304,10 @@ export const LedgerExplorerView: React.FC<LedgerExplorerViewProps> = ({
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       <div>
-                        <span className="text-slate-500 text-[11px]">PREVIOUS HASH:</span>
+                        <span className="text-slate-400 text-[11px]">PREVIOUS HASH:</span>
                         <div className="bg-slate-900 px-3 py-1.5 rounded border border-slate-800 text-slate-300 break-all select-all text-[11px]">
                           {event.previous_hash === GENESIS_HASH ? (
-                            <span className="text-slate-500">GENESIS (64x 0x00)</span>
+                            <span className="text-slate-400">GENESIS (64x 0x00)</span>
                           ) : (
                             event.previous_hash
                           )}
@@ -312,7 +315,7 @@ export const LedgerExplorerView: React.FC<LedgerExplorerViewProps> = ({
                       </div>
 
                       <div>
-                        <span className="text-slate-500 text-[11px]">PAYLOAD SHA-256:</span>
+                        <span className="text-slate-400 text-[11px]">PAYLOAD SHA-256:</span>
                         <div className="bg-slate-900 px-3 py-1.5 rounded border border-slate-800 text-slate-300 break-all select-all text-[11px]">
                           {event.payload_sha256}
                         </div>
@@ -320,7 +323,7 @@ export const LedgerExplorerView: React.FC<LedgerExplorerViewProps> = ({
                     </div>
 
                     <div>
-                      <span className="text-slate-500 text-[11px]">PAYLOAD OBJECT:</span>
+                      <span className="text-slate-400 text-[11px]">PAYLOAD OBJECT:</span>
                       <pre className="bg-slate-900 p-3 rounded border border-slate-800 text-slate-200 text-[11px] overflow-x-auto">
                         {JSON.stringify(event.payload, null, 2)}
                       </pre>

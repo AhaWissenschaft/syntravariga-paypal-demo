@@ -18,15 +18,16 @@ import {
 import {
   LedgerEvent,
   LedgerError,
-  verifyLedgerEvents,
   verifyReceiptForOrder,
   extractVerifiedAmountFromReceiptEvent,
   assertReceiptNotConsumed,
   assertAllowedClientEventType,
 } from './src/kernel/ledger';
 import {
-  loadAndVerifyPersistentLedger,
+  loadVerifiedLedgerSnapshot,
   appendEventPersistently,
+  appendEventPersistentlyWithContext,
+  resolveSqliteDbPath,
   PersistentPaymentStore,
   PaymentConcurrencyError,
   PaymentStateUnknownError,
@@ -62,7 +63,68 @@ const BIND_HOST = process.env.BIND_HOST || '127.0.0.1';
 const GEMINI_MODEL_ID = process.env.GEMINI_MODEL_ID || 'gemini-3.8-flash';
 
 export function getLedgerFilePath(): string {
-  return process.env.SYNTRA_DEMO_LEDGER || '/tmp/syntravariga_paypal_demo.jsonl';
+  return process.env.SYNTRA_DEMO_LEDGER || path.join(os.tmpdir(), 'syntravariga_paypal_demo.jsonl');
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    return code === 'EPERM';
+  }
+}
+
+/**
+ * Enforces single-instance process ownership per SQLite database file.
+ * Prevents a second server process from treating an active process's in-flight payments as crashed.
+ */
+export function acquireSingleInstanceServerLock(ledgerFilePath: string): () => void {
+  const dbPath = resolveSqliteDbPath(ledgerFilePath);
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const lockPath = `${dbPath}.server.pid`;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = fs.openSync(lockPath, 'wx');
+      try {
+        fs.writeFileSync(fd, `${process.pid}\n`, 'utf8');
+      } finally {
+        fs.closeSync(fd);
+      }
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try {
+          if (fs.existsSync(lockPath) && fs.readFileSync(lockPath, 'utf8').trim() === String(process.pid)) {
+            fs.unlinkSync(lockPath);
+          }
+        } catch {
+          // Best-effort unlock during shutdown
+        }
+      };
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      if (code !== 'EEXIST') throw err;
+      const rawPid = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8').trim() : '';
+      const existingPid = Number(rawPid);
+      if (Number.isInteger(existingPid) && existingPid > 0 && isProcessAlive(existingPid)) {
+        throw new Error(
+          `Single-instance database lock active: process PID ${existingPid} already owns '${dbPath}'. Stop that server before starting another process against the same database.`
+        );
+      }
+      try {
+        fs.unlinkSync(lockPath);
+      } catch {
+        // Retry once if another cleaner removed it concurrently
+      }
+    }
+  }
+
+  throw new Error(`Could not acquire single-instance lock for '${dbPath}'.`);
 }
 
 export function hasValidGeminiApiKey(
@@ -184,6 +246,26 @@ export function verifyExactHostAndOrigin(
   return { ok: true };
 }
 
+const EXPLICIT_MISSING_PLACEHOLDER_PATTERNS: Record<
+  'vendor' | 'invoice_number' | 'net_amount' | 'tax_amount' | 'gross_amount',
+  RegExp
+> = {
+  vendor: /(?:^|\b)(?:Lieferant|Aussteller|Rechnungssteller|Vendor|Supplier|Firma)\b[^:\n]*:\s*(?:[-–—]{2,}|n\/?a|tbd|missing|fehlt|\?)\s*$/im,
+  invoice_number: /(?:^|\b)(?:Rechnung\s*(?:Nr\.?|Nummer)?|Invoice\s*(?:No\.?|Number|#)?|Beleg(?:-Nr\.?)?)\b[^:\n:#]*[:#]\s*(?:[-–—]{2,}|n\/?a|tbd|missing|fehlt|\?)\s*$/im,
+  net_amount: /(?:^|\b)(?:Netto(?:betrag)?|Net(?:\s*Amount)?|Subtotal|Zwischensumme)\b[^:\n]*:\s*(?:[-–—]{2,}|n\/?a|tbd|missing|fehlt|\?)/im,
+  tax_amount: /(?:^|\b)(?:Umsatzsteuer|MwSt\.?|Steuer(?:betrag)?|VAT|Tax)\b[^:\n]*:\s*(?:[-–—]{2,}|n\/?a|tbd|missing|fehlt|\?)/im,
+  gross_amount: /(?:^|\b)(?:Gesamtbetrag|Brutto(?:betrag)?|Rechnungsbetrag|Zahlbetrag|Total(?:\s*Amount)?|Payable(?:\s*Amount)?|Gross(?:\s*Amount)?)\b[^:\n]*:\s*(?:[-–—]{2,}|n\/?a|tbd|missing|fehlt|\?)/im,
+};
+
+function sanitizeExtractedTextValue(val: string | undefined): string {
+  const cleaned = (val || '').trim();
+  if (!cleaned) return '';
+  if (/^(?:[-–—]{2,}|n\/?a|tbd|missing|fehlt|unknown|\?)$/i.test(cleaned)) {
+    return '';
+  }
+  return cleaned;
+}
+
 async function extractInvoiceWithAiOrFallback(
   rawText: string,
   allowExternalAi: boolean
@@ -196,6 +278,7 @@ async function extractInvoiceWithAiOrFallback(
       const ai = new GoogleGenAI({
         apiKey: process.env.GEMINI_API_KEY,
         httpOptions: {
+          timeout: 15000,
           headers: {
             'User-Agent': 'aistudio-build',
           },
@@ -253,42 +336,73 @@ async function extractInvoiceWithAiOrFallback(
         extractor_notes: string;
       };
 
-      const mergedWarnings = Array.from(
-        new Set([...(parsed.warnings || []), ...baseline.warnings])
-      );
-      const mergedMissing = Array.from(
-        new Set([...(parsed.missing_fields || []), ...baseline.missing_fields])
-      );
+      const aiMissingSet = new Set(parsed.missing_fields || []);
+      const hasAmbiguousNet = baseline.ambiguous_fields.some((a) => a.field === 'net_amount');
+      const hasAmbiguousTax = baseline.ambiguous_fields.some((a) => a.field === 'tax_amount');
       const hasAmbiguousGross = baseline.ambiguous_fields.some(
         (a) => a.field === 'gross_amount'
       );
 
+      const resolvedVendor =
+        EXPLICIT_MISSING_PLACEHOLDER_PATTERNS.vendor.test(rawText) || aiMissingSet.has('vendor')
+          ? ''
+          : sanitizeExtractedTextValue(parsed.vendor || baseline.proposed_fields.vendor);
+      const resolvedInvoiceNumber =
+        EXPLICIT_MISSING_PLACEHOLDER_PATTERNS.invoice_number.test(rawText) ||
+        aiMissingSet.has('invoice_number')
+          ? ''
+          : sanitizeExtractedTextValue(
+              parsed.invoice_number || baseline.proposed_fields.invoice_number
+            );
+      const resolvedNet =
+        hasAmbiguousNet ||
+        EXPLICIT_MISSING_PLACEHOLDER_PATTERNS.net_amount.test(rawText) ||
+        aiMissingSet.has('net_amount')
+          ? ''
+          : normalizeExtractedAmount(parsed.net_amount || baseline.proposed_fields.net_amount);
+      const resolvedTax =
+        hasAmbiguousTax ||
+        EXPLICIT_MISSING_PLACEHOLDER_PATTERNS.tax_amount.test(rawText) ||
+        aiMissingSet.has('tax_amount')
+          ? ''
+          : normalizeExtractedAmount(parsed.tax_amount || baseline.proposed_fields.tax_amount);
+      const resolvedGross =
+        hasAmbiguousGross ||
+        EXPLICIT_MISSING_PLACEHOLDER_PATTERNS.gross_amount.test(rawText) ||
+        aiMissingSet.has('gross_amount')
+          ? ''
+          : normalizeExtractedAmount(
+              parsed.gross_amount || parsed.amount || baseline.proposed_fields.gross_amount
+            );
+
       const proposedFields = {
-        vendor: (parsed.vendor || baseline.proposed_fields.vendor || '').trim(),
-        invoice_number: (
-          parsed.invoice_number ||
-          baseline.proposed_fields.invoice_number ||
-          ''
-        ).trim(),
-        net_amount: baseline.missing_fields.includes('net_amount')
-          ? ''
-          : normalizeExtractedAmount(parsed.net_amount || baseline.proposed_fields.net_amount),
-        tax_amount: baseline.missing_fields.includes('tax_amount')
-          ? ''
-          : normalizeExtractedAmount(parsed.tax_amount || baseline.proposed_fields.tax_amount),
-        gross_amount:
-          hasAmbiguousGross || baseline.missing_fields.includes('gross_amount')
-            ? ''
-            : normalizeExtractedAmount(
-                parsed.gross_amount || baseline.proposed_fields.gross_amount
-              ),
-        amount:
-          hasAmbiguousGross || baseline.missing_fields.includes('gross_amount')
-            ? ''
-            : normalizeExtractedAmount(
-                parsed.amount || parsed.gross_amount || baseline.proposed_fields.amount
-              ),
+        vendor: resolvedVendor,
+        invoice_number: resolvedInvoiceNumber,
+        net_amount: resolvedNet,
+        tax_amount: resolvedTax,
+        gross_amount: resolvedGross,
+        amount: resolvedGross,
       };
+
+      const effectiveMissingFields: string[] = [];
+      if (!proposedFields.vendor) effectiveMissingFields.push('vendor');
+      if (!proposedFields.invoice_number) effectiveMissingFields.push('invoice_number');
+      if (!proposedFields.net_amount) effectiveMissingFields.push('net_amount');
+      if (!proposedFields.tax_amount) effectiveMissingFields.push('tax_amount');
+      if (!proposedFields.gross_amount) effectiveMissingFields.push('gross_amount');
+
+      const warningSet = new Set<string>(
+        (parsed.warnings || []).map((w) => w.trim()).filter(Boolean)
+      );
+      if (effectiveMissingFields.length > 0) {
+        warningSet.add('Field not found');
+      }
+      if (baseline.ambiguous_fields.length > 0) {
+        warningSet.add('Multiple candidate amounts found');
+      }
+      if (effectiveMissingFields.length > 0 || baseline.ambiguous_fields.length > 0) {
+        warningSet.add('Manual review required');
+      }
 
       const unsigned: Omit<AiInvoiceExtractionResult, 'proposal_sha256'> = {
         schema: 'aha.syntravariga.ai-invoice-proposal.v1',
@@ -297,8 +411,8 @@ async function extractInvoiceWithAiOrFallback(
         requires_human_confirmation: true,
         input_text_sha256: baseline.input_text_sha256,
         proposed_fields: proposedFields,
-        warnings: mergedWarnings,
-        missing_fields: mergedMissing,
+        warnings: Array.from(warningSet),
+        missing_fields: effectiveMissingFields,
         ambiguous_fields: baseline.ambiguous_fields,
         extractor_notes: parsed.extractor_notes || baseline.extractor_notes,
       };
@@ -341,6 +455,7 @@ async function generatePrivacyPreservingAiExplanation(
       const ai = new GoogleGenAI({
         apiKey: process.env.GEMINI_API_KEY,
         httpOptions: {
+          timeout: 15000,
           headers: {
             'User-Agent': 'aistudio-build',
           },
@@ -427,12 +542,11 @@ export function createConfiguredExpressApp(
   hostOptions?: ExpressAppConfigOptions
 ) {
   const ledgerPath = customLedgerPath || getLedgerFilePath();
-  // Point 1: Load and verify existing SQLite ledger on startup; fail closed if corrupted!
-  let serverLedger: LedgerEvent[] = loadAndVerifyPersistentLedger(ledgerPath);
+  loadVerifiedLedgerSnapshot(ledgerPath);
   const paymentStore = new PersistentPaymentStore(ledgerPath);
-  // Point 1 & 4: Recover any in-flight payment states (`RESERVED_ORDER`, `CAPTURE_PENDING`) left by a prior crash!
+  // Recover any in-flight payment states (`RESERVED_ORDER`, `CAPTURE_PENDING`) left by a prior crash!
   paymentStore.recoverInFlightRecordsOnStartup();
-  serverLedger = loadAndVerifyPersistentLedger(ledgerPath);
+  let serverLedger: LedgerEvent[] = loadVerifiedLedgerSnapshot(ledgerPath).events;
 
   const paypalManager = customPayPalManager || new PayPalSandboxManager();
 
@@ -455,12 +569,12 @@ export function createConfiguredExpressApp(
 
   app.get('/api/ledger', (_req: Request, res: Response) => {
     try {
-      serverLedger = loadAndVerifyPersistentLedger(ledgerPath);
-      const report = verifyLedgerEvents(serverLedger);
+      const snapshot = loadVerifiedLedgerSnapshot(ledgerPath);
+      serverLedger = snapshot.events;
       res.json({
         events: serverLedger,
-        report,
-        payment_records: paymentStore.getAllRecords(),
+        report: snapshot.report,
+        payment_records: snapshot.paymentRecords,
         environment_capabilities: {
           gemini_api_configured: hasValidGeminiApiKey(),
           gemini_model_id: GEMINI_MODEL_ID,
@@ -479,12 +593,11 @@ export function createConfiguredExpressApp(
     try {
       const { eventType, payload } = req.body || {};
       const safeEventType = assertAllowedClientEventType(eventType);
-      const { events, newEvent } = appendEventPersistently(ledgerPath, {
+      const { events, newEvent, report } = appendEventPersistently(ledgerPath, {
         eventType: safeEventType,
         payload,
       });
       serverLedger = events;
-      const report = verifyLedgerEvents(serverLedger);
       res.json({ event: newEvent, events: serverLedger, report });
     } catch (err) {
       if (err instanceof LedgerError && err.message.includes('forbidden client event_type')) {
@@ -524,7 +637,7 @@ export function createConfiguredExpressApp(
         allowExternalAi
       );
 
-      const { events, newEvent } = appendEventPersistently(ledgerPath, {
+      const { events, newEvent, report } = appendEventPersistently(ledgerPath, {
         eventType: 'ai_invoice_extraction',
         timestamp: new Date().toISOString(),
         payload: {
@@ -541,7 +654,6 @@ export function createConfiguredExpressApp(
         },
       });
       serverLedger = events;
-      const report = verifyLedgerEvents(serverLedger);
 
       res.json({
         proposal,
@@ -565,29 +677,34 @@ export function createConfiguredExpressApp(
         res.status(400).json({ error: 'JSON object required' });
         return;
       }
-      serverLedger = loadAndVerifyPersistentLedger(ledgerPath);
       const invoiceInput = req.body as Partial<InvoiceData>;
-      const seenDigests = req.body?.ignore_duplicate_check
-        ? new Set<string>()
-        : collectVerifiedInvoiceDigests(serverLedger);
-      const result = analyzeInvoice(invoiceInput, { seenInvoiceRefDigests: seenDigests });
-      const findingCodes = result.findings.map((f) => f.code);
+      let analysisResult: ReturnType<typeof analyzeInvoice> | null = null;
 
-      const { events, newEvent } = appendEventPersistently(ledgerPath, {
-        eventType: 'invoice_review',
-        timestamp: new Date().toISOString(),
-        payload: {
-          finding_codes: findingCodes,
-          status: result.status,
-          verified_amount_eur: result.verified_amount_eur ?? null,
-          verified_currency: 'EUR',
-          invoice_ref_sha256: result.invoice_ref_sha256 ?? null,
-          human_confirmed_inputs: true,
-          scope: 'deterministic_demo_review',
-        },
-      });
+      const { events, newEvent, report } = appendEventPersistentlyWithContext(
+        ledgerPath,
+        (existingEvents) => {
+          const seenDigests = req.body?.ignore_duplicate_check
+            ? new Set<string>()
+            : collectVerifiedInvoiceDigests(existingEvents);
+          const result = analyzeInvoice(invoiceInput, { seenInvoiceRefDigests: seenDigests });
+          analysisResult = result;
+          return {
+            eventType: 'invoice_review',
+            timestamp: new Date().toISOString(),
+            payload: {
+              finding_codes: result.findings.map((f) => f.code),
+              status: result.status,
+              verified_amount_eur: result.verified_amount_eur ?? null,
+              verified_currency: 'EUR',
+              invoice_ref_sha256: result.invoice_ref_sha256 ?? null,
+              human_confirmed_inputs: true,
+              scope: 'deterministic_demo_review',
+            },
+          };
+        }
+      );
       serverLedger = events;
-      const report = verifyLedgerEvents(serverLedger);
+      const result = analysisResult!;
 
       res.json({
         ...result,
@@ -623,7 +740,7 @@ export function createConfiguredExpressApp(
         return;
       }
       const summary = analyzeInvoiceBatch(items as BatchInvoiceItem[]);
-      const { events, newEvent } = appendEventPersistently(ledgerPath, {
+      const { events, newEvent, report } = appendEventPersistently(ledgerPath, {
         eventType: 'batch_invoice_audit',
         timestamp: new Date().toISOString(),
         payload: {
@@ -637,7 +754,6 @@ export function createConfiguredExpressApp(
         },
       });
       serverLedger = events;
-      const report = verifyLedgerEvents(serverLedger);
       res.json({
         summary,
         batch_event: newEvent,
@@ -660,7 +776,7 @@ export function createConfiguredExpressApp(
       delete bodyCopy.allow_external_ai;
 
       const validatedReq = validateAiExplainRequest(bodyCopy);
-      serverLedger = loadAndVerifyPersistentLedger(ledgerPath);
+      serverLedger = loadVerifiedLedgerSnapshot(ledgerPath).events;
 
       const matchingEvent = serverLedger.find(
         (e) => e.event_hash === validatedReq.receipt_hash && e.event_type === 'invoice_review'
@@ -690,7 +806,7 @@ export function createConfiguredExpressApp(
         allowExternalAi
       );
 
-      const { events, newEvent } = appendEventPersistently(ledgerPath, {
+      const { events, newEvent, report: updatedReport } = appendEventPersistently(ledgerPath, {
         eventType: 'ai_finding_explanation',
         timestamp: new Date().toISOString(),
         payload: {
@@ -707,7 +823,6 @@ export function createConfiguredExpressApp(
         },
       });
       serverLedger = events;
-      const updatedReport = verifyLedgerEvents(serverLedger);
 
       res.json({
         explanation,
@@ -729,13 +844,29 @@ export function createConfiguredExpressApp(
     }
   });
 
-  // Point 1, 2 & 3: SQLite ACID reservation before await + co-committed status & ledger update
+  const resolveCommittedSnapshot = (committed: {
+    events?: LedgerEvent[];
+    report?: ReturnType<typeof loadVerifiedLedgerSnapshot>['report'];
+    paymentRecords?: ReturnType<typeof loadVerifiedLedgerSnapshot>['paymentRecords'];
+  }) => {
+    if (committed.events && committed.report && committed.paymentRecords) {
+      return {
+        events: committed.events,
+        report: committed.report,
+        paymentRecords: committed.paymentRecords,
+      };
+    }
+    return loadVerifiedLedgerSnapshot(ledgerPath);
+  };
+
+  // SQLite ACID reservation before await + co-committed status & ledger update
   const handlePayPalOrder = async (req: Request, res: Response) => {
     const { receipt, requested_amount_eur } = req.body || {};
     let reservedReceiptHash: string | null = null;
     try {
-      serverLedger = loadAndVerifyPersistentLedger(ledgerPath);
-      const verifiedEvent = verifyReceiptForOrder(serverLedger, receipt);
+      const snapshot = loadVerifiedLedgerSnapshot(ledgerPath);
+      serverLedger = snapshot.events;
+      const verifiedEvent = verifyReceiptForOrder(serverLedger, receipt, snapshot.report);
       assertReceiptNotConsumed(serverLedger, receipt.event_hash);
       const verifiedAmountEur = extractVerifiedAmountFromReceiptEvent(verifiedEvent);
 
@@ -772,8 +903,8 @@ export function createConfiguredExpressApp(
         executionMode: order.execution_mode,
         appendLedgerEvent: true,
       });
-      serverLedger = committed.events || loadAndVerifyPersistentLedger(ledgerPath);
-      const report = verifyLedgerEvents(serverLedger);
+      const updated = resolveCommittedSnapshot(committed);
+      serverLedger = updated.events;
 
       res.json({
         id: order.id,
@@ -783,8 +914,8 @@ export function createConfiguredExpressApp(
         order,
         order_event: committed.newEvent,
         events: serverLedger,
-        ledger_report: report,
-        payment_records: paymentStore.getAllRecords(),
+        ledger_report: updated.report,
+        payment_records: updated.paymentRecords,
       });
     } catch (err) {
       if (
@@ -835,14 +966,15 @@ export function createConfiguredExpressApp(
   app.post('/api/paypal/approve', async (req: Request, res: Response) => {
     try {
       const { receipt, order_id } = req.body || {};
-      serverLedger = loadAndVerifyPersistentLedger(ledgerPath);
-      const verifiedEvent = verifyReceiptForOrder(serverLedger, receipt);
+      const snapshot = loadVerifiedLedgerSnapshot(ledgerPath);
+      serverLedger = snapshot.events;
+      const verifiedEvent = verifyReceiptForOrder(serverLedger, receipt, snapshot.report);
       const verifiedAmountEur = extractVerifiedAmountFromReceiptEvent(verifiedEvent);
       if (typeof order_id !== 'string') {
         throw new ValueError('order_id required');
       }
 
-      const boundRecord = paymentStore.getRecord(receipt.event_hash);
+      const boundRecord = snapshot.paymentRecords[receipt.event_hash];
       if (!boundRecord || boundRecord.order_id !== order_id) {
         res.status(409).json({
           error: `Order '${order_id}' is not bound to verified receipt '${String(receipt.event_hash).slice(0, 12)}...'`,
@@ -865,8 +997,8 @@ export function createConfiguredExpressApp(
         executionMode: order.execution_mode,
         appendLedgerEvent: true,
       });
-      serverLedger = committed.events || loadAndVerifyPersistentLedger(ledgerPath);
-      const report = verifyLedgerEvents(serverLedger);
+      const updated = resolveCommittedSnapshot(committed);
+      serverLedger = updated.events;
 
       res.json({
         id: order.id,
@@ -875,8 +1007,8 @@ export function createConfiguredExpressApp(
         order,
         approval_event: committed.newEvent,
         events: serverLedger,
-        ledger_report: report,
-        payment_records: paymentStore.getAllRecords(),
+        ledger_report: updated.report,
+        payment_records: updated.paymentRecords,
       });
     } catch (err) {
       if (err instanceof PaymentConcurrencyError || err instanceof PaymentStateUnknownError) {
@@ -903,8 +1035,9 @@ export function createConfiguredExpressApp(
     const { receipt, order_id } = req.body || {};
     let reservedReceiptHash: string | null = null;
     try {
-      serverLedger = loadAndVerifyPersistentLedger(ledgerPath);
-      const verifiedEvent = verifyReceiptForOrder(serverLedger, receipt);
+      const snapshot = loadVerifiedLedgerSnapshot(ledgerPath);
+      serverLedger = snapshot.events;
+      const verifiedEvent = verifyReceiptForOrder(serverLedger, receipt, snapshot.report);
       const verifiedAmountEur = extractVerifiedAmountFromReceiptEvent(verifiedEvent);
       if (typeof order_id !== 'string') {
         throw new ValueError('order_id required');
@@ -934,8 +1067,8 @@ export function createConfiguredExpressApp(
         executionMode: order.execution_mode,
         appendLedgerEvent: true,
       });
-      serverLedger = committed.events || loadAndVerifyPersistentLedger(ledgerPath);
-      const report = verifyLedgerEvents(serverLedger);
+      const updated = resolveCommittedSnapshot(committed);
+      serverLedger = updated.events;
 
       res.json({
         id: order.id,
@@ -945,8 +1078,8 @@ export function createConfiguredExpressApp(
         order,
         capture_event: committed.newEvent,
         events: serverLedger,
-        ledger_report: report,
-        payment_records: paymentStore.getAllRecords(),
+        ledger_report: updated.report,
+        payment_records: updated.paymentRecords,
       });
     } catch (err) {
       if (reservedReceiptHash && !(err instanceof PaymentConcurrencyError)) {
@@ -1000,15 +1133,15 @@ export function createConfiguredExpressApp(
         appendLedgerEvent: true,
       });
 
-      serverLedger = committed.events || loadAndVerifyPersistentLedger(ledgerPath);
-      const report = verifyLedgerEvents(serverLedger);
+      const updated = resolveCommittedSnapshot(committed);
+      serverLedger = updated.events;
 
       res.json({
         record: committed.record,
         reconciliation_event: committed.newEvent,
         events: serverLedger,
-        ledger_report: report,
-        payment_records: paymentStore.getAllRecords(),
+        ledger_report: updated.report,
+        payment_records: updated.paymentRecords,
       });
     } catch (err) {
       if (err instanceof PaymentConcurrencyError || err instanceof PaymentStateUnknownError) {
@@ -1033,7 +1166,7 @@ export function createConfiguredExpressApp(
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'syntra-redteam-isolated-'));
     const isolatedLedgerPath = path.join(tmpDir, 'isolated_ledger.jsonl');
     try {
-      loadAndVerifyPersistentLedger(isolatedLedgerPath);
+      loadVerifiedLedgerSnapshot(isolatedLedgerPath);
       const isolatedStore = new PersistentPaymentStore(isolatedLedgerPath);
       const isolatedPayPal = new PayPalSandboxManager();
       const results = [];
@@ -1162,10 +1295,19 @@ export function createConfiguredExpressApp(
 }
 
 async function startServer() {
-  const app = createConfiguredExpressApp(undefined, undefined, {
-    expectedLocalPort: PORT,
-    trustedAppUrl: process.env.APP_URL,
-  });
+  const releaseDbLock = acquireSingleInstanceServerLock(getLedgerFilePath());
+  process.once('exit', releaseDbLock);
+
+  let app: ReturnType<typeof createConfiguredExpressApp>;
+  try {
+    app = createConfiguredExpressApp(undefined, undefined, {
+      expectedLocalPort: PORT,
+      trustedAppUrl: process.env.APP_URL,
+    });
+  } catch (err) {
+    releaseDbLock();
+    throw err;
+  }
 
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
@@ -1182,11 +1324,25 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, BIND_HOST, () => {
+  const server = app.listen(PORT, BIND_HOST, () => {
     console.log(
       `[SyntraVariga Server] Listening on http://${BIND_HOST}:${PORT} (Gemini API key present: ${hasValidGeminiApiKey()}, Live PayPal Sandbox credentials present: ${hasLiveSandboxCredentials(process.env)})`
     );
   });
+
+  const handleSignal = (signal: string) => {
+    server.close(() => {
+      releaseDbLock();
+      process.exit(0);
+    });
+    setTimeout(() => {
+      releaseDbLock();
+      process.exit(signal === 'SIGINT' ? 130 : 143);
+    }, 1500).unref();
+  };
+
+  process.once('SIGINT', () => handleSignal('SIGINT'));
+  process.once('SIGTERM', () => handleSignal('SIGTERM'));
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {

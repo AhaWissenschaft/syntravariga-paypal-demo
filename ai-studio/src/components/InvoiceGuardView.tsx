@@ -17,6 +17,8 @@ import {
   Swords,
   ShieldCheck,
   Wrench,
+  Loader2,
+  RotateCcw,
 } from 'lucide-react';
 import {
   analyzeInvoice,
@@ -143,9 +145,16 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
     INVOICE_TEXT_SCENARIOS.sceneB_consistent.expected_amount
   );
 
-  // Explicit Consent Flags (Point 4: External AI only after explicit consent; provider & transmitted fields clearly disclosed)
+  // Explicit Consent Flags (External AI only after explicit consent; provider & transmitted fields clearly disclosed)
   const [allowExternalAiForText, setAllowExternalAiForText] = useState<boolean>(false);
   const [allowExternalAiForExplain, setAllowExternalAiForExplain] = useState<boolean>(false);
+  const [checkLedgerDuplicates, setCheckLedgerDuplicates] = useState<boolean>(false);
+
+  // Honest Session-Level Live Execution Proof (only emerald green once actually verified live)
+  const [liveGeminiVerifiedModel, setLiveGeminiVerifiedModel] = useState<string | null>(null);
+  const [livePayPalVerifiedCaptureId, setLivePayPalVerifiedCaptureId] = useState<string | null>(
+    null
+  );
 
   // Step 1 Extraction Output & Error State
   const [extracting, setExtracting] = useState(false);
@@ -204,12 +213,33 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
   }, [formData]);
 
   const isConsistent = localAnalysis.status === 'FIELDS_CONSISTENT';
+  const isPayPalBusy =
+    paypalStep === 'creating_order' ||
+    paypalStep === 'approving' ||
+    paypalStep === 'capturing' ||
+    reconciling;
 
   // Active payment record from persistent store if a receipt is active
   const currentPaymentRecord: PersistentPaymentRecord | null = useMemo(() => {
     if (!lastReceipt) return null;
     return paymentRecords[lastReceipt.event_hash] || null;
   }, [lastReceipt, paymentRecords]);
+
+  const persistedPaymentList = useMemo(
+    () =>
+      Object.values(paymentRecords).sort((a, b) => b.receipt_index - a.receipt_index),
+    [paymentRecords]
+  );
+
+  const refreshServerSnapshot = () => {
+    fetch('/api/ledger')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (Array.isArray(d?.events)) onSyncEvents(d.events);
+        if (d?.payment_records) onSyncPaymentRecords(d.payment_records);
+      })
+      .catch(() => {});
+  };
 
   // Reset downstream state whenever any input changes (changes require a new review!)
   const invalidateConfirmedReview = () => {
@@ -221,11 +251,94 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
     setErrorMsg(null);
   };
 
+  const handleResumePersistedRecord = (rec: PersistentPaymentRecord) => {
+    const matchingReview = events.find(
+      (e) => e.event_hash === rec.receipt_hash && e.event_type === 'invoice_review'
+    );
+    const verifiedAmt = rec.verified_amount_eur;
+    setFormData((prev) => ({
+      ...prev,
+      expected_amount: verifiedAmt,
+      amount: verifiedAmt,
+      gross_amount: verifiedAmt,
+    }));
+    setExpectedAmount(verifiedAmt);
+    setLastReceipt({
+      index: rec.receipt_index,
+      event_id: matchingReview?.event_id || `restored-${rec.receipt_index}`,
+      event_hash: rec.receipt_hash,
+      timestamp: matchingReview?.timestamp || rec.updated_at,
+      verified_amount_eur: verifiedAmt,
+      verified_currency: 'EUR',
+      consumed: rec.state === 'COMPLETED',
+    });
+    setAiExplanation(null);
+    setExplainAiError(null);
+    setErrorMsg(null);
+
+    const syntheticOrder: PayPalSandboxOrder | null = rec.order_id
+      ? {
+          id: rec.order_id,
+          intent: 'CAPTURE',
+          create_time: rec.updated_at,
+          status:
+            rec.state === 'COMPLETED'
+              ? 'COMPLETED'
+              : rec.state === 'ORDER_APPROVED' || rec.state === 'CAPTURE_PENDING'
+                ? 'APPROVED'
+                : 'CREATED',
+          approve_url:
+            rec.approve_url ||
+            `https://www.sandbox.paypal.com/checkoutnow?token=${encodeURIComponent(rec.order_id)}`,
+          execution_mode: rec.execution_mode || 'SANDBOX_PROTOCOL_SIMULATION',
+          purchase_units: [
+            {
+              custom_id: rec.receipt_hash,
+              description: `SyntraVariga Verified Invoice (${rec.receipt_hash.slice(0, 12)})`,
+              amount: { currency_code: 'EUR', value: rec.verified_amount_eur },
+              payments: rec.capture_id
+                ? {
+                    captures: [
+                      {
+                        id: rec.capture_id,
+                        status: 'COMPLETED',
+                        create_time: rec.updated_at,
+                        amount: { currency_code: 'EUR', value: rec.verified_amount_eur },
+                      },
+                    ],
+                  }
+                : undefined,
+            },
+          ],
+          payer:
+            rec.state === 'ORDER_APPROVED' || rec.state === 'COMPLETED'
+              ? { email_address: 'sandbox-buyer@aha-demo.example', payer_id: 'SANDBOX_BUYER' }
+              : undefined,
+        }
+      : null;
+
+    setActiveOrder(syntheticOrder);
+    if (rec.state === 'COMPLETED') {
+      setPaypalStep('completed');
+    } else if (rec.state === 'ORDER_APPROVED') {
+      setPaypalStep('order_approved');
+    } else if (rec.state === 'ORDER_CREATED') {
+      setPaypalStep('order_created');
+    } else {
+      setPaypalStep('idle');
+    }
+  };
+
   const handleSelectScenario = (key: keyof typeof INVOICE_TEXT_SCENARIOS) => {
     const sc = INVOICE_TEXT_SCENARIOS[key];
     setRawInvoiceText(sc.raw_text);
     setExpectedVendor(sc.expected_vendor);
     setExpectedAmount(sc.expected_amount);
+    setFormData((prev) => ({
+      ...prev,
+      expected_vendor: sc.expected_vendor,
+      expected_amount: sc.expected_amount,
+    }));
     setAiProposal(null);
     setExtractAiError(null);
     invalidateConfirmedReview();
@@ -255,6 +368,9 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
       const proposal: AiInvoiceExtractionResult = data.proposal;
       setAiProposal(proposal);
       setExtractAiError(data.external_ai_error || null);
+      if (proposal.provider_mode === 'LIVE_GEMINI_API') {
+        setLiveGeminiVerifiedModel(proposal.model_id);
+      }
       if (Array.isArray(data.events)) {
         onSyncEvents(data.events);
       }
@@ -286,6 +402,7 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
 
   // Step 2: Human confirms fields & triggers server-side deterministic rules + ledger sealing (`POST /api/review`)
   const handleConfirmAndSealReview = async () => {
+    if (isPayPalBusy) return;
     setReviewing(true);
     setErrorMsg(null);
     setAiExplanation(null);
@@ -297,7 +414,7 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
       const res = await fetch('/api/review', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...formData, ignore_duplicate_check: true }),
+        body: JSON.stringify({ ...formData, ignore_duplicate_check: !checkLedgerDuplicates }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -340,6 +457,9 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
       }
 
       setAiExplanation(data.explanation);
+      if (data.explanation?.provider_mode === 'LIVE_GEMINI_API') {
+        setLiveGeminiVerifiedModel(data.explanation.model_id);
+      }
       setExplainAiError(data.external_ai_error || null);
       if (Array.isArray(data.events)) {
         onSyncEvents(data.events);
@@ -353,7 +473,7 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
 
   // Step 4a: Create PayPal Sandbox Order bound to server-verified amount & receipt (`POST /api/paypal/order`)
   const handleCreateSandboxOrder = async () => {
-    if (!lastReceipt || !isConsistent) return;
+    if (!lastReceipt || !isConsistent || isPayPalBusy) return;
     setPaypalStep('creating_order');
     setErrorMsg(null);
 
@@ -385,19 +505,13 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
     } catch (err) {
       setPaypalStep('idle');
       setErrorMsg(err instanceof Error ? err.message : String(err));
-      // Refresh ledger & payment records in case state transitioned to UNKNOWN
-      fetch('/api/ledger')
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d) => {
-          if (d?.payment_records) onSyncPaymentRecords(d.payment_records);
-        })
-        .catch(() => {});
+      refreshServerSnapshot();
     }
   };
 
   // Step 4b: Buyer approves order in PayPal Sandbox (`POST /api/paypal/approve`)
   const handleApproveSandboxOrder = async () => {
-    if (!lastReceipt || !activeOrder) return;
+    if (!lastReceipt || !activeOrder || isPayPalBusy) return;
     setPaypalStep('approving');
     setErrorMsg(null);
 
@@ -429,12 +543,13 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
     } catch (err) {
       setPaypalStep('order_created');
       setErrorMsg(err instanceof Error ? err.message : String(err));
+      refreshServerSnapshot();
     }
   };
 
   // Step 4c: Capture approved PayPal Sandbox Order (`POST /api/paypal/capture`)
   const handleCaptureSandboxOrder = async () => {
-    if (!lastReceipt || !activeOrder) return;
+    if (!lastReceipt || !activeOrder || isPayPalBusy) return;
     setPaypalStep('capturing');
     setErrorMsg(null);
 
@@ -459,6 +574,10 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
       }
 
       setActiveOrder(data.order);
+      const captureId = data.order?.purchase_units?.[0]?.payments?.captures?.[0]?.id;
+      if (data.order?.execution_mode === 'LIVE_PAYPAL_SANDBOX_REST' && captureId) {
+        setLivePayPalVerifiedCaptureId(captureId);
+      }
       setPaypalStep('completed');
       if (Array.isArray(data.events)) {
         onSyncEvents(data.events);
@@ -466,18 +585,13 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
     } catch (err) {
       setPaypalStep('order_approved');
       setErrorMsg(err instanceof Error ? err.message : String(err));
-      fetch('/api/ledger')
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d) => {
-          if (d?.payment_records) onSyncPaymentRecords(d.payment_records);
-        })
-        .catch(() => {});
+      refreshServerSnapshot();
     }
   };
 
   // Manual Reconciliation Handler (`POST /api/paypal/reconcile`)
   const handleManualReconcile = async (resolution: 'MARK_CANCELLED' | 'CONFIRM_CAPTURED') => {
-    if (!lastReceipt) return;
+    if (!lastReceipt || reconciling) return;
     setReconciling(true);
     setErrorMsg(null);
 
@@ -630,13 +744,13 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Top Banner: Clear Demo/Sandbox Scope & Honest Provider Transparency */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-sm space-y-3">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div>
+      {/* Top Banner: 30-Second Jury Value Strip & Honest Provider Transparency */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-sm space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
+          <div className="space-y-2.5 max-w-3xl">
             <div className="flex flex-wrap items-center gap-2">
               <span className="p-1.5 rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-                <FileCheck className="w-5 h-5" />
+                <FileCheck className="w-5 h-5" aria-hidden="true" />
               </span>
               <h2 className="text-lg font-semibold text-white">
                 SyntraVariga Invoice &amp; Payment Guard
@@ -645,43 +759,73 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
                 DEMO &amp; PAYPAL SANDBOX ONLY (FICTITIOUS DATA)
               </span>
             </div>
-            <p className="text-xs text-slate-300 mt-1.5 max-w-3xl leading-relaxed">
-              <strong>Verification Architecture &amp; Scope:</strong> Structured fields are proposed
-              from invoice text and must be confirmed by a human reviewer. Deterministic integer-cent
-              rules alone decide <code>FIELDS_CONSISTENT</code> vs. <code>REVIEW_REQUIRED</code>.
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] leading-snug">
+              <div className="bg-slate-950/80 border border-slate-800 rounded-lg px-3 py-2">
+                <span className="font-mono text-indigo-300 font-semibold block">Target Audience</span>
+                <span className="text-slate-300">
+                  Freelancers &amp; SMB finance teams verifying incoming supplier invoices before checkout.
+                </span>
+              </div>
+              <div className="bg-slate-950/80 border border-slate-800 rounded-lg px-3 py-2">
+                <span className="font-mono text-indigo-300 font-semibold block">Problem Solved</span>
+                <span className="text-slate-300">
+                  Catches supplier mismatches, VAT math errors, overcharges, and duplicate references before payment.
+                </span>
+              </div>
+              <div className="bg-slate-950/80 border border-slate-800 rounded-lg px-3 py-2">
+                <span className="font-mono text-indigo-300 font-semibold block">Guarded Pipeline</span>
+                <span className="text-slate-300">
+                  AI proposal &rarr; human confirm &rarr; deterministic rules &rarr; SHA-256 log &rarr; PayPal Sandbox check.
+                </span>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              <strong>Architecture &amp; Honest Limits:</strong> Deterministic integer-cent rules
+              alone decide <code>FIELDS_CONSISTENT</code> vs. <code>REVIEW_REQUIRED</code>.
               External AI calls require explicit user opt-in; otherwise deterministic local
-              fallbacks (not AI) are used. Each verified receipt is atomically reserved on disk to
-              mitigate concurrent double-processing, though no system can guarantee absolute
-              protection against all external double-payment scenarios.
+              fallbacks (not AI) run. Verified receipts are atomically reserved in SQLite to reduce
+              concurrent double-processing risk, while manual PayPal reconciliation covers network ambiguity.
             </p>
           </div>
 
-          {/* Transparent Runtime Status Badges */}
+          {/* Transparent Runtime Status Badges (Emerald green only once actually verified live) */}
           <div className="flex flex-col sm:flex-row lg:flex-col gap-1.5 text-[11px] font-mono shrink-0">
-            <div className="px-2.5 py-1 rounded bg-slate-950 border border-slate-800 flex items-center justify-between gap-2">
-              <span className="text-slate-400">Gemini API Key:</span>
+            <div className="px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800 flex items-center justify-between gap-3">
+              <span className="text-slate-400">Gemini API:</span>
               <span
                 className={
-                  envCaps.gemini_api_configured ? 'text-emerald-400' : 'text-amber-300'
+                  liveGeminiVerifiedModel
+                    ? 'text-emerald-400'
+                    : envCaps.gemini_api_configured
+                      ? 'text-sky-300'
+                      : 'text-amber-300'
                 }
               >
-                {envCaps.gemini_api_configured
-                  ? `Configured (${envCaps.gemini_model_id || 'gemini-3.8-flash'}, Opt-In Required)`
-                  : 'Not Configured (Deterministic Non-AI Mode)'}
+                {liveGeminiVerifiedModel
+                  ? `Live Verified (${liveGeminiVerifiedModel})`
+                  : envCaps.gemini_api_configured
+                    ? `Key Configured (Opt-In · Unverified Live)`
+                    : 'Not Configured (Deterministic Non-AI Mode)'}
               </span>
             </div>
-            <div className="px-2.5 py-1 rounded bg-slate-950 border border-slate-800 flex items-center justify-between gap-2">
+            <div className="px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800 flex items-center justify-between gap-3">
               <span className="text-slate-400">PayPal Sandbox:</span>
               <span
                 className={
-                  envCaps.paypal_live_sandbox_credentials_configured
+                  livePayPalVerifiedCaptureId
                     ? 'text-emerald-400'
-                    : 'text-amber-300'
+                    : envCaps.paypal_live_sandbox_credentials_configured
+                      ? 'text-sky-300'
+                      : 'text-amber-300'
                 }
               >
-                {envCaps.paypal_live_sandbox_credentials_configured
-                  ? 'Live Sandbox REST API'
-                  : 'Local Sandbox Protocol Simulation'}
+                {livePayPalVerifiedCaptureId
+                  ? `Live Capture Verified (${livePayPalVerifiedCaptureId})`
+                  : envCaps.paypal_live_sandbox_credentials_configured
+                    ? 'Live Sandbox Keys Set (Unverified Live)'
+                    : 'Local Sandbox Protocol Simulation'}
               </span>
             </div>
           </div>
@@ -692,34 +836,40 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
           <span className="text-xs font-mono text-slate-400 mr-1">
             Load Fictitious Scenario:
           </span>
-          <button
-            type="button"
-            onClick={() => handleSelectScenario('sceneB_consistent')}
-            className="px-3 py-1.5 text-xs rounded-lg bg-emerald-950/60 hover:bg-emerald-900/60 text-emerald-200 border border-emerald-700/50 font-mono transition"
-          >
-            Scenario B: Consistent Invoice (119.00 EUR)
-          </button>
-          <button
-            type="button"
-            onClick={() => handleSelectScenario('sceneA_discrepancy')}
-            className="px-3 py-1.5 text-xs rounded-lg bg-rose-950/60 hover:bg-rose-900/60 text-rose-200 border border-rose-700/50 font-mono transition"
-          >
-            Scenario A: Amount Discrepancy (149.00 EUR vs. 119.00 EUR)
-          </button>
-          <button
-            type="button"
-            onClick={() => handleSelectScenario('missingAmount')}
-            className="px-3 py-1.5 text-xs rounded-lg bg-amber-950/60 hover:bg-amber-900/60 text-amber-200 border border-amber-700/50 font-mono transition"
-          >
-            Edge Case: Missing Tax Amount
-          </button>
-          <button
-            type="button"
-            onClick={() => handleSelectScenario('ambiguousTotals')}
-            className="px-3 py-1.5 text-xs rounded-lg bg-purple-950/60 hover:bg-purple-900/60 text-purple-200 border border-purple-700/50 font-mono transition"
-          >
-            Edge Case: Two Conflicting Total Amounts
-          </button>
+          {(
+            [
+              {
+                key: 'sceneB_consistent',
+                label: 'Scenario B: Consistent Invoice (119.00 EUR)',
+                cls: 'bg-emerald-950/60 hover:bg-emerald-900/60 text-emerald-200 border-emerald-700/50',
+              },
+              {
+                key: 'sceneA_discrepancy',
+                label: 'Scenario A: Amount Discrepancy (149.00 EUR vs. 119.00 EUR)',
+                cls: 'bg-rose-950/60 hover:bg-rose-900/60 text-rose-200 border-rose-700/50',
+              },
+              {
+                key: 'missingAmount',
+                label: 'Edge Case: Missing Tax Amount',
+                cls: 'bg-amber-950/60 hover:bg-amber-900/60 text-amber-200 border-amber-700/50',
+              },
+              {
+                key: 'ambiguousTotals',
+                label: 'Edge Case: Two Conflicting Total Amounts',
+                cls: 'bg-purple-950/60 hover:bg-purple-900/60 text-purple-200 border-purple-700/50',
+              },
+            ] as const
+          ).map(({ key, label, cls }) => (
+            <button
+              key={key}
+              type="button"
+              disabled={isPayPalBusy}
+              onClick={() => handleSelectScenario(key)}
+              className={`px-3 py-1.5 text-xs rounded-lg border font-mono transition disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 ${cls}`}
+            >
+              {label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -758,53 +908,68 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
             {/* Expected Order Values */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-950/70 p-3.5 rounded-lg border border-slate-800">
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
+                <label
+                  htmlFor="po-expected-vendor"
+                  className="block text-xs font-medium text-slate-300 mb-1"
+                >
                   Expected Supplier (Purchase Order)
                 </label>
                 <input
+                  id="po-expected-vendor"
                   type="text"
                   name="expected_vendor"
                   value={formData.expected_vendor}
                   onChange={handleFieldChange}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  disabled={isPayPalBusy}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:ring-2 focus:ring-indigo-400 disabled:opacity-50"
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
+                <label
+                  htmlFor="po-expected-amount"
+                  className="block text-xs font-medium text-slate-300 mb-1"
+                >
                   Expected Order Gross Amount (EUR)
                 </label>
                 <input
+                  id="po-expected-amount"
                   type="text"
                   name="expected_amount"
                   value={formData.expected_amount}
                   onChange={handleFieldChange}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  disabled={isPayPalBusy}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:ring-2 focus:ring-indigo-400 disabled:opacity-50"
                 />
               </div>
             </div>
 
             {/* Fictitious Invoice Textarea */}
             <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">
+              <label
+                htmlFor="raw-invoice-textarea"
+                className="block text-xs font-medium text-slate-300 mb-1"
+              >
                 Fictitious Invoice Text (For Field Proposal &amp; Uncertainty Detection)
               </label>
               <textarea
+                id="raw-invoice-textarea"
                 rows={5}
                 value={rawInvoiceText}
+                disabled={isPayPalBusy}
                 onChange={(e) => {
                   setRawInvoiceText(e.target.value);
                   setAiProposal(null);
                   setExtractAiError(null);
                   invalidateConfirmedReview();
                 }}
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-xs text-slate-100 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-xs text-slate-100 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-400 disabled:opacity-50"
               />
             </div>
 
             {/* Privacy & Consent Control for Step 1 */}
             <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-[11px] text-slate-300 space-y-2">
               <div className="flex items-start gap-2">
-                <Info className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
+                <Info className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" aria-hidden="true" />
                 <div>
                   <strong>Privacy &amp; External AI Consent (Step 1):</strong> By default, field
                   extraction runs <strong>100% locally via a deterministic regex parser (not AI)</strong>{' '}
@@ -814,12 +979,16 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
                   Note: API calls may incur costs depending on your Google API key billing tier.
                 </div>
               </div>
-              <label className="flex items-center gap-2 text-[11px] font-mono text-indigo-300 cursor-pointer pt-1">
+              <label
+                htmlFor="optin-extract-gemini"
+                className="flex items-center gap-2 text-[11px] font-mono text-indigo-300 cursor-pointer pt-1"
+              >
                 <input
+                  id="optin-extract-gemini"
                   type="checkbox"
                   checked={allowExternalAiForText}
                   onChange={(e) => setAllowExternalAiForText(e.target.checked)}
-                  className="rounded border-slate-700 bg-slate-900 text-indigo-600"
+                  className="rounded border-slate-700 bg-slate-900 text-indigo-600 focus:ring-2 focus:ring-indigo-400"
                 />
                 <span>
                   Explicit Consent: Transmit fictitious invoice text above to Google Gemini API
@@ -831,10 +1000,15 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
               <button
                 type="button"
                 onClick={handleRunAiExtraction}
-                disabled={extracting}
-                className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold font-mono flex items-center gap-2 shadow-sm transition"
+                disabled={extracting || isPayPalBusy}
+                aria-busy={extracting}
+                className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold font-mono flex items-center gap-2 shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
               >
-                <FileText className="w-3.5 h-3.5" />
+                {extracting ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+                ) : (
+                  <FileText className="w-3.5 h-3.5" aria-hidden="true" />
+                )}
                 {extracting
                   ? 'Extracting Fields...'
                   : 'Step 1: Propose Structured Fields from Text'}
@@ -927,106 +1101,102 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Supplier on Invoice (Actual)
-                </label>
-                <input
-                  type="text"
-                  name="vendor"
-                  value={formData.vendor}
-                  onChange={handleFieldChange}
-                  placeholder="Missing – please inspect"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Invoice Number
-                </label>
-                <input
-                  type="text"
-                  name="invoice_number"
-                  value={formData.invoice_number}
-                  onChange={handleFieldChange}
-                  placeholder="Missing – please inspect"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Net Amount (EUR)
-                </label>
-                <input
-                  type="text"
-                  name="net_amount"
-                  value={formData.net_amount}
-                  onChange={handleFieldChange}
-                  placeholder="Missing – please inspect"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  VAT / Tax Amount (EUR)
-                </label>
-                <input
-                  type="text"
-                  name="tax_amount"
-                  value={formData.tax_amount}
-                  onChange={handleFieldChange}
-                  placeholder="Missing – please inspect"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Gross Amount on Invoice (EUR)
-                </label>
-                <input
-                  type="text"
-                  name="gross_amount"
-                  value={formData.gross_amount}
-                  onChange={handleFieldChange}
-                  placeholder="Please inspect / select"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Payment Amount to Verify (EUR)
-                </label>
-                <input
-                  type="text"
-                  name="amount"
-                  value={formData.amount}
-                  onChange={handleFieldChange}
-                  placeholder="Please inspect / select"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                />
-              </div>
+              {(
+                [
+                  {
+                    name: 'vendor',
+                    label: 'Supplier on Invoice (Actual)',
+                    placeholder: 'Missing – please inspect',
+                  },
+                  {
+                    name: 'invoice_number',
+                    label: 'Invoice Number',
+                    placeholder: 'Missing – please inspect',
+                  },
+                  {
+                    name: 'net_amount',
+                    label: 'Net Amount (EUR)',
+                    placeholder: 'Missing – please inspect',
+                  },
+                  {
+                    name: 'tax_amount',
+                    label: 'VAT / Tax Amount (EUR)',
+                    placeholder: 'Missing – please inspect',
+                  },
+                  {
+                    name: 'gross_amount',
+                    label: 'Gross Amount on Invoice (EUR)',
+                    placeholder: 'Please inspect / select',
+                  },
+                  {
+                    name: 'amount',
+                    label: 'Payment Amount to Verify (EUR)',
+                    placeholder: 'Please inspect / select',
+                  },
+                ] as const
+              ).map(({ name, label, placeholder }) => (
+                <div key={name}>
+                  <label
+                    htmlFor={`field-${name}`}
+                    className="block text-xs font-medium text-slate-300 mb-1"
+                  >
+                    {label}
+                  </label>
+                  <input
+                    id={`field-${name}`}
+                    type="text"
+                    name={name}
+                    value={formData[name]}
+                    onChange={handleFieldChange}
+                    disabled={isPayPalBusy}
+                    placeholder={placeholder}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:ring-2 focus:ring-indigo-400 disabled:opacity-50"
+                  />
+                </div>
+              ))}
             </div>
 
-            <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-t border-slate-800">
-              <span className="text-[11px] text-slate-400">
-                Any edit to any field above immediately invalidates the active verification receipt.
-              </span>
-              <button
-                type="button"
-                onClick={handleConfirmAndSealReview}
-                disabled={reviewing}
-                className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-slate-950 font-semibold text-xs font-mono flex items-center justify-center gap-2 shadow-sm transition shrink-0"
-              >
-                <Lock className="w-3.5 h-3.5" />
-                {reviewing
-                  ? 'Verifying Rules...'
-                  : 'Step 2: Confirm Fields & Run Deterministic Rules'}
-              </button>
+            <div className="pt-2 flex flex-col gap-3 border-t border-slate-800">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <label
+                  htmlFor="toggle-ledger-duplicate-check"
+                  className="flex items-center gap-2 text-[11px] font-mono text-slate-300 cursor-pointer"
+                >
+                  <input
+                    id="toggle-ledger-duplicate-check"
+                    type="checkbox"
+                    checked={checkLedgerDuplicates}
+                    onChange={(e) => setCheckLedgerDuplicates(e.target.checked)}
+                    disabled={isPayPalBusy}
+                    className="rounded border-slate-700 bg-slate-900 text-indigo-600 focus:ring-2 focus:ring-indigo-400"
+                  />
+                  <span>
+                    Check against previously verified ledger invoice numbers (
+                    <code>DUPLICATE_INVOICE</code>)
+                  </span>
+                </label>
+                <span className="text-[11px] text-slate-400">
+                  Any edit invalidates the active receipt.
+                </span>
+              </div>
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={handleConfirmAndSealReview}
+                  disabled={reviewing || isPayPalBusy}
+                  aria-busy={reviewing}
+                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-slate-950 font-semibold text-xs font-mono flex items-center justify-center gap-2 shadow-sm transition shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
+                >
+                  {reviewing ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Lock className="w-3.5 h-3.5" aria-hidden="true" />
+                  )}
+                  {reviewing
+                    ? 'Verifying Rules...'
+                    : 'Step 2: Confirm Fields & Run Deterministic Rules'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1126,12 +1296,16 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
                     <strong>Google Gemini ({envCaps.gemini_model_id || 'gemini-3.8-flash'})</strong>{' '}
                     (zero invoice PII).
                   </div>
-                  <label className="flex items-center gap-2 text-[11px] font-mono text-indigo-300 cursor-pointer">
+                  <label
+                    htmlFor="optin-explain-gemini"
+                    className="flex items-center gap-2 text-[11px] font-mono text-indigo-300 cursor-pointer"
+                  >
                     <input
+                      id="optin-explain-gemini"
                       type="checkbox"
                       checked={allowExternalAiForExplain}
                       onChange={(e) => setAllowExternalAiForExplain(e.target.checked)}
-                      className="rounded border-slate-700 bg-slate-900 text-indigo-600"
+                      className="rounded border-slate-700 bg-slate-900 text-indigo-600 focus:ring-2 focus:ring-indigo-400"
                     />
                     <span>
                       Explicit Consent: Send status &amp; finding_codes to Google Gemini API
@@ -1143,9 +1317,14 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
                   type="button"
                   onClick={handleRequestAiFindingExplanation}
                   disabled={explaining}
-                  className="w-full py-2 px-3 rounded-lg bg-indigo-950/80 hover:bg-indigo-900/80 text-indigo-200 border border-indigo-500/40 text-xs font-mono flex items-center justify-center gap-1.5 transition"
+                  aria-busy={explaining}
+                  className="w-full py-2 px-3 rounded-lg bg-indigo-950/80 hover:bg-indigo-900/80 disabled:opacity-50 text-indigo-200 border border-indigo-500/40 text-xs font-mono flex items-center justify-center gap-1.5 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
                 >
-                  <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+                  {explaining ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" aria-hidden="true" />
+                  ) : (
+                    <Sparkles className="w-3.5 h-3.5 text-indigo-400" aria-hidden="true" />
+                  )}
                   {explaining
                     ? 'Generating Zero-PII Finding Explanation...'
                     : 'Step 3: Explain Finding Codes (Zero Invoice PII)'}
@@ -1219,15 +1398,15 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
 
             {!lastReceipt ? (
               <div className="bg-slate-950 border border-slate-800 rounded-lg p-4 text-xs text-slate-400 font-mono flex items-center gap-2.5">
-                <Lock className="w-4 h-4 text-slate-500 shrink-0" />
+                <Lock className="w-4 h-4 text-slate-400 shrink-0" aria-hidden="true" />
                 <span>
                   Payment path locked: Confirm and verify the proposed invoice fields in Step 2
-                  first.
+                  first (or resume a persisted Sandbox record below).
                 </span>
               </div>
             ) : !isConsistent ? (
               <div className="bg-rose-950/60 border border-rose-700/60 rounded-lg p-4 text-xs text-rose-200 font-mono flex items-start gap-2.5">
-                <ShieldAlert className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+                <ShieldAlert className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" aria-hidden="true" />
                 <div className="space-y-1">
                   <div className="font-bold text-rose-300">
                     PAYMENT PATH LOCKED (STATUS: REVIEW_REQUIRED)
@@ -1248,14 +1427,14 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
                     </span>
                   </div>
                   <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-slate-500">One-Time Receipt:</span>
+                    <span className="text-slate-400">One-Time Receipt:</span>
                     <span className="text-slate-300">
                       #{lastReceipt.index} ({lastReceipt.event_hash.slice(0, 12)}…)
                     </span>
                   </div>
                   {currentPaymentRecord && (
                     <div className="flex items-center justify-between text-[11px] pt-1 border-t border-slate-800/80">
-                      <span className="text-slate-500">Persistent Payment State:</span>
+                      <span className="text-slate-400">Persistent Payment State:</span>
                       <span className="text-indigo-300 font-semibold">
                         {currentPaymentRecord.state}
                       </span>
@@ -1263,11 +1442,30 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
                   )}
                 </div>
 
+                {/* Explicit Payment Lock & Progress Banner while PayPal Sandbox request is in flight */}
+                {isPayPalBusy && !reconciling && (
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className="bg-indigo-950/60 border border-indigo-500/50 rounded-lg p-3 text-xs font-mono text-indigo-200 flex items-center gap-2.5"
+                  >
+                    <Loader2 className="w-4 h-4 animate-spin text-indigo-300 shrink-0" aria-hidden="true" />
+                    <div>
+                      {paypalStep === 'creating_order' &&
+                        'Creating PayPal Sandbox Order (payment actions locked to prevent double execution)...'}
+                      {paypalStep === 'approving' &&
+                        'Verifying Sandbox Buyer Approval via PayPal API (payment actions locked)...'}
+                      {paypalStep === 'capturing' &&
+                        'Capturing Approved PayPal Sandbox Order (payment actions locked; awaiting final confirmation)...'}
+                    </div>
+                  </div>
+                )}
+
                 {/* Manual Reconciliation UI when state is UNKNOWN_RECONCILIATION_REQUIRED */}
                 {currentPaymentRecord?.state === 'UNKNOWN_RECONCILIATION_REQUIRED' && (
                   <div className="bg-amber-950/60 border border-amber-500/60 rounded-lg p-3.5 space-y-2.5 text-xs font-mono">
                     <div className="font-bold text-amber-300 flex items-center gap-1.5">
-                      <Wrench className="w-4 h-4 text-amber-400" />
+                      <Wrench className="w-4 h-4 text-amber-400" aria-hidden="true" />
                       STATE UNKNOWN — MANUAL RECONCILIATION REQUIRED
                     </div>
                     <p className="text-[11px] text-amber-100">
@@ -1276,52 +1474,64 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
                       accidental double processing. Please inspect the PayPal Sandbox dashboard and
                       reconcile manually:
                     </p>
-                    <input
-                      type="text"
-                      value={reconcileNote}
-                      onChange={(e) => setReconcileNote(e.target.value)}
-                      placeholder="Operator reconciliation note..."
-                      className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-[11px] text-white"
-                    />
-                    <div className="flex flex-wrap gap-2">
+                    <div>
+                      <label htmlFor="reconcile-note-input" className="sr-only">
+                        Operator reconciliation note
+                      </label>
+                      <input
+                        id="reconcile-note-input"
+                        type="text"
+                        value={reconcileNote}
+                        onChange={(e) => setReconcileNote(e.target.value)}
+                        placeholder="Operator reconciliation note..."
+                        className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-[11px] text-white focus:outline-none focus:ring-2 focus:ring-amber-400"
+                      />
+                    </div>
+                    <div className="flex flex-wrap gap-2 items-center">
                       <button
                         type="button"
                         disabled={reconciling}
                         onClick={() => handleManualReconcile('MARK_CANCELLED')}
-                        className="px-2.5 py-1.5 rounded bg-rose-800 hover:bg-rose-700 text-white text-[11px]"
+                        className="px-2.5 py-1.5 rounded bg-rose-800 hover:bg-rose-700 disabled:opacity-50 text-white text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300"
                       >
-                        Mark Cancelled / Not Executed
+                        {reconciling ? 'Updating...' : 'Mark Cancelled / Not Executed'}
                       </button>
+                      <label htmlFor="reconcile-capture-id" className="sr-only">
+                        PayPal Sandbox Capture ID
+                      </label>
                       <input
+                        id="reconcile-capture-id"
                         type="text"
                         value={reconcileCaptureId}
                         onChange={(e) => setReconcileCaptureId(e.target.value)}
                         placeholder="Capture ID (if captured)"
-                        className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-[11px] text-white w-36"
+                        className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-[11px] text-white w-36 focus:outline-none focus:ring-2 focus:ring-amber-400"
                       />
                       <button
                         type="button"
                         disabled={reconciling}
                         onClick={() => handleManualReconcile('CONFIRM_CAPTURED')}
-                        className="px-2.5 py-1.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-[11px]"
+                        className="px-2.5 py-1.5 rounded bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
                       >
-                        Confirm Captured in Sandbox
+                        {reconciling ? 'Updating...' : 'Confirm Captured in Sandbox'}
                       </button>
                     </div>
                   </div>
                 )}
 
                 {paypalStep === 'idle' &&
-                  currentPaymentRecord?.state !== 'UNKNOWN_RECONCILIATION_REQUIRED' && (
+                  currentPaymentRecord?.state !== 'UNKNOWN_RECONCILIATION_REQUIRED' &&
+                  currentPaymentRecord?.state !== 'COMPLETED' && (
                     <button
                       type="button"
+                      disabled={isPayPalBusy}
                       onClick={handleCreateSandboxOrder}
-                      className="w-full py-2.5 px-4 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs font-mono flex items-center justify-center gap-2 shadow transition"
+                      className="w-full py-2.5 px-4 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs font-mono flex items-center justify-center gap-2 shadow transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
                     >
                       <span>
                         1. Create PayPal Sandbox Order for {lastReceipt.verified_amount_eur} EUR
                       </span>
-                      <ArrowRight className="w-4 h-4" />
+                      <ArrowRight className="w-4 h-4" aria-hidden="true" />
                     </button>
                   )}
 
@@ -1340,19 +1550,20 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
                           href={activeOrder.approve_url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-[11px] text-amber-300 hover:text-amber-200 underline"
+                          className="inline-flex items-center gap-1 text-[11px] text-amber-300 hover:text-amber-200 underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 rounded"
                         >
                           <span>Official PayPal Sandbox Buyer Approval Link ({activeOrder.id})</span>
-                          <ExternalLink className="w-3 h-3" />
+                          <ExternalLink className="w-3 h-3" aria-hidden="true" />
                         </a>
                       </div>
                     </div>
                     <button
                       type="button"
+                      disabled={isPayPalBusy}
                       onClick={handleApproveSandboxOrder}
-                      className="w-full py-2 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs font-mono flex items-center justify-center gap-2 transition"
+                      className="w-full py-2 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold text-xs font-mono flex items-center justify-center gap-2 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300"
                     >
-                      <UserCheck className="w-3.5 h-3.5" />
+                      <UserCheck className="w-3.5 h-3.5" aria-hidden="true" />
                       <span>
                         {activeOrder.execution_mode === 'LIVE_PAYPAL_SANDBOX_REST'
                           ? '2. Verify Buyer Approval via PayPal Sandbox (GET Order)'
@@ -1375,10 +1586,11 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
                     </div>
                     <button
                       type="button"
+                      disabled={isPayPalBusy}
                       onClick={handleCaptureSandboxOrder}
-                      className="w-full py-2 px-3 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs font-mono flex items-center justify-center gap-2 transition"
+                      className="w-full py-2 px-3 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-xs font-mono flex items-center justify-center gap-2 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
                     >
-                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <CheckCircle2 className="w-3.5 h-3.5" aria-hidden="true" />
                       <span>
                         3. Capture Approved Sandbox Order ({lastReceipt.verified_amount_eur} EUR)
                       </span>
@@ -1389,13 +1601,14 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
                 {paypalStep === 'completed' && activeOrder && (
                   <div className="bg-emerald-950/60 border border-emerald-500/50 rounded-lg p-3.5 text-xs font-mono text-emerald-200 space-y-1.5">
                     <div className="font-bold text-emerald-300 flex items-center gap-1.5">
-                      <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400" aria-hidden="true" />
                       PayPal Sandbox Status: {activeOrder.status}
                     </div>
                     <div className="text-[11px] text-slate-200">
                       Order ID: <span className="text-white">{activeOrder.id}</span> · Capture ID:{' '}
                       <span className="text-white">
                         {activeOrder.purchase_units[0]?.payments?.captures?.[0]?.id ||
+                          currentPaymentRecord?.capture_id ||
                           activeOrder.id}
                       </span>
                     </div>
@@ -1405,6 +1618,57 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
                     </div>
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* Persisted SQLite Payment Records (Survives Reloads & Server Restarts) */}
+            {persistedPaymentList.length > 0 && (
+              <div className="pt-3 border-t border-slate-800 space-y-2">
+                <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
+                  <span>Persisted Sandbox Payment Records (SQLite)</span>
+                  <span>{persistedPaymentList.length} total</span>
+                </div>
+                <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                  {persistedPaymentList.slice(0, 6).map((rec) => (
+                    <div
+                      key={rec.receipt_hash}
+                      className="bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-[11px] font-mono flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                    >
+                      <div className="space-y-0.5 min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="text-slate-200 font-semibold">
+                            #{rec.receipt_index} · {rec.verified_amount_eur} EUR
+                          </span>
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                              rec.state === 'COMPLETED'
+                                ? 'bg-emerald-500/20 text-emerald-300'
+                                : rec.state === 'UNKNOWN_RECONCILIATION_REQUIRED'
+                                  ? 'bg-amber-500/20 text-amber-300'
+                                  : 'bg-indigo-500/20 text-indigo-300'
+                            }`}
+                          >
+                            {rec.state}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-slate-400 truncate">
+                          Receipt {rec.receipt_hash.slice(0, 12)}…
+                          {rec.order_id ? ` · Order ${rec.order_id}` : ''}
+                          {rec.capture_id ? ` · Capture ${rec.capture_id}` : ''}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={isPayPalBusy}
+                        onClick={() => handleResumePersistedRecord(rec)}
+                        className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 flex items-center gap-1 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                      >
+                        <RotateCcw className="w-3 h-3" aria-hidden="true" />
+                        Resume / Inspect
+                      </button>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>
@@ -1434,15 +1698,17 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
               type="button"
               onClick={handleRunBatchAudit}
               disabled={batchLoading}
-              className="px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-mono font-semibold shrink-0 transition"
+              aria-busy={batchLoading}
+              className="px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-mono font-semibold shrink-0 transition flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
             >
+              {batchLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />}
               {batchLoading ? 'Evaluating Batch...' : 'Evaluate 5 Fictitious Sample Invoices'}
             </button>
           </div>
 
           {batchSummary ? (
             <div className="space-y-3">
-              <div className="grid grid-cols-3 gap-3 text-xs font-mono">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs font-mono">
                 <div className="bg-slate-950 border border-slate-800 rounded-lg p-3">
                   <div className="text-slate-400 text-[10px]">Sample Batch Total</div>
                   <div className="text-sm font-bold text-white mt-0.5">
@@ -1528,8 +1794,10 @@ export const InvoiceGuardView: React.FC<InvoiceGuardViewProps> = ({
               type="button"
               onClick={handleRunRedTeamSuite}
               disabled={runningRedTeam}
-              className="px-3 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-mono font-semibold shrink-0 transition"
+              aria-busy={runningRedTeam}
+              className="px-3 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-xs font-mono font-semibold shrink-0 transition flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300"
             >
+              {runningRedTeam && <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />}
               {runningRedTeam ? 'Running Isolated Checks...' : 'Run 4 Isolated Negative Checks'}
             </button>
           </div>

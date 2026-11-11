@@ -1,60 +1,89 @@
 # SyntraVariga Invoice & Payment Guard (AhaWissenschaft)
 
-**PayPal AI Hackathon Submission Prototype (v1.4 Hardened)**
-**License:** MIT (see `/LICENSE`)
+**PayPal AI Hackathon Candidate (`ai-studio/`) — Branch [`feature/invoice-guard-public`](https://github.com/AhaWissenschaft/syntravariga-paypal-demo/tree/feature/invoice-guard-public)**  
+**License:** MIT (see [`LICENSE`](../LICENSE) and [`ai-studio/LICENSE`](LICENSE))  
 **Scope:** PayPal Sandbox & Demo Only · Fictitious Invoice Data · Human-in-the-Loop Verification
+
+> **For Hackathon Judges:**  
+> The React + TypeScript + Express + SQLite application lives in [`ai-studio/`](https://github.com/AhaWissenschaft/syntravariga-paypal-demo/tree/feature/invoice-guard-public/ai-studio) on branch **`feature/invoice-guard-public`**. The earlier standalone Python demo remains preserved at the repository root, while [`reference_python/`](reference_python/) inside `ai-studio/` is an older reference snapshot preserved for regression comparison.
 
 ---
 
 ## 1. Overview & Judge Guide (English)
 
-### Problem Statement
-Small businesses and freelancers frequently inspect incoming supplier invoices manually before paying them:
+### Target Audience & Problem Statement
+Small businesses and freelancers often inspect incoming supplier invoices manually before triggering a payout:
 1. Does the supplier name on the invoice match the purchase order?
 2. Does the billed total match the expected purchase order amount?
-3. Does `Net + Tax` equal `Gross` in exact integer cents?
-4. Has an invoice with the same supplier and invoice number already been verified (`DUPLICATE_INVOICE`)?
+3. Does exact integer-cent math hold (`Net + Tax === Gross === Payable Amount`)?
+4. Has the same supplier and invoice number already been verified in the audit log (`DUPLICATE_INVOICE`)?
+
+### End-to-End Guarded Pipeline
+1. **Field Proposal (`POST /api/ai/extract`):** Extracts structured fields from English or German invoice text (`vendor`, `invoice_number`, `net_amount`, `tax_amount`, `gross_amount`, `amount`) and flags missing placeholders or conflicting totals.
+2. **Human Inspection & Confirmation:** A human reviewer edits/confirms fields. Any edit invalidates any prior verification receipt.
+3. **Deterministic Integer-Cent Rules (`invoiceGuard.ts`):** Solely decides `FIELDS_CONSISTENT` vs. `REVIEW_REQUIRED` (`VENDOR_MISMATCH`, `EXPECTED_AMOUNT_MISMATCH`, `TAX_MISMATCH` / `TOTAL_MISMATCH`, `DUPLICATE_INVOICE`).
+4. **Tamper-Evident Audit Ledger & Zero-PII Explainer (`POST /api/ai/explain`):** Seals the decision in an append-only SHA-256 chain. When explaining findings, only `{ status, finding_codes }` (zero raw invoice fields) leave the server if external AI opt-in is enabled.
+5. **Atomic Payment Reservation & Server-Bound PayPal Sandbox Checkout:** Binds one-time receipt -> `verified_amount_eur` -> `EUR` -> `PayPal-Request-Id` idempotency keys in SQLite (`BEGIN IMMEDIATE`) before any PayPal API request, then requires explicit buyer approval before capture.
+6. **Live Sandbox Status & Timeout Reconciliation:** Surfaces actual `order_id`, `capture_id`, `EUR` amount, and `COMPLETED` status; timeouts move strictly into `UNKNOWN_RECONCILIATION_REQUIRED` to block blind retries.
 
 ### Architecture & Security Boundaries (v1.4)
 
 | Component | Responsibility & Strict Boundary |
 |---|---|
-| **1. Invoice Field Proposal (`POST /api/ai/extract`)** | Proposes structured fields (`vendor`, `invoice_number`, `net_amount`, `tax_amount`, `gross_amount`, `amount`) from free-form fictitious invoice text and flags missing or conflicting amounts. **Privacy Default:** Runs **100% locally via a deterministic regex parser (not AI)** unless the user explicitly checks the consent box to transmit the fictitious demo text to Google Gemini (`gemini-3.8-flash`). Any model error is surfaced transparently in `external_ai_error`. |
+| **1. Invoice Field Proposal (`POST /api/ai/extract`)** | Proposes structured fields from free-form fictitious invoice text and flags missing/ambiguous totals. **Privacy Default:** Runs **100% locally via a deterministic regex parser (not AI)** unless the user explicitly checks the consent box to transmit the fictitious demo text to Google Gemini (`gemini-3.8-flash`). Any model error or 15s timeout falls back cleanly and surfaces in `external_ai_error`. |
 | **2. Human Inspection & Confirmation** | A human reviewer inspects, edits, and confirms the proposed fields. Any subsequent edit immediately invalidates the active verification receipt. |
-| **3. Deterministic Verification Rules (`invoiceGuard.ts`)** | Evaluates confirmed fields using integer-cent arithmetic ($Net_{cent} + Tax_{cent} \equiv Gross_{cent} \equiv Amount_{cent}$), Unicode `NFKC` normalization, and SHA-256 duplicate-invoice detection (`DUPLICATE_INVOICE`). Solely decides `FIELDS_CONSISTENT` vs. `REVIEW_REQUIRED`. |
-| **4. Zero-PII Finding Code Explainer (`POST /api/ai/explain`)** | Runs a deterministic local rule dictionary (not AI) by default. Only when the user explicitly opts in (`allow_external_ai: true`) does it transmit `{ status, finding_codes }` (never raw invoice fields) to Google Gemini (`gemini-3.8-flash`). The server strictly enforces `SERVER_ENFORCED_BOUNDARY_DISCLAIMER` and locks the `finding_codes` list. |
-| **5. Transactional SQLite Ledger & Payment Co-Storage (`persistentStore.ts`)** | Stores both the cryptographic audit ledger (`ledger_events`) and payment lifecycle state (`payment_records`) in a single ACID SQLite database (`node:sqlite`, `WAL`, `BEGIN IMMEDIATE`). Eliminates stale `.lock` files on process crash: OS-level SQLite locks release automatically on unexpected termination and uncommitted writes roll back cleanly. Payment state transitions (`ORDER_CREATED`, `ORDER_APPROVED`, `COMPLETED`, `UNKNOWN_RECONCILIATION_REQUIRED`) and their corresponding audit ledger events are committed together in a **single ACID SQLite transaction**. On server startup, `recoverInFlightRecordsOnStartup()` atomically transitions any interrupted `RESERVED_ORDER` or `CAPTURE_PENDING` record into `UNKNOWN_RECONCILIATION_REQUIRED` co-committed with a `paypal_crash_recovery_lock` ledger event. |
-| **6. Strict PayPal Response Validation (`paypalSandbox.ts`)** | Validates Order ID, status, **exactly one** `purchase_unit`, `custom_id === receipt_hash`, `currency_code === 'EUR'`, `value === verified_amount_eur`, and **exactly one** `COMPLETED` capture record without substituting missing fields with expected values. |
-| **7. Exact Host & Origin Validation (`verifyExactHostAndOrigin`)** | Validates `Host` and `Origin` headers including exact scheme (`http:` vs `https:`), hostname, and port (`:3000`). Never accepts wildcard `*.run.app` origins; a Cloud Preview origin is permitted only if its exact `protocol://host[:port]` is explicitly configured via `APP_URL` or `TRUSTED_PREVIEW_ORIGIN`. |
-| **8. Isolated Negative Self-Test (`POST /api/redteam/isolated`)** | Executes 4 internal function and temporary SQLite negative checks mapped to HTTP 403/400/409 equivalents—making zero external API calls and zero modifications to the active ledger. |
+| **3. Deterministic Verification Rules (`invoiceGuard.ts`)** | Evaluates confirmed fields using integer-cent arithmetic (`Net + Tax === Gross === Amount`), Unicode `NFKC` normalization, and optional SHA-256 duplicate-invoice detection (`DUPLICATE_INVOICE`). Solely decides `FIELDS_CONSISTENT` vs. `REVIEW_REQUIRED`. |
+| **4. Zero-PII Finding Code Explainer (`POST /api/ai/explain`)** | Runs a deterministic local rule dictionary (not AI) by default. Only when the user explicitly opts in (`allow_external_ai: true`) does it transmit `{ status, finding_codes }` (never raw invoice fields) to Google Gemini (`gemini-3.8-flash`). Server-enforced contract locks `finding_codes` and appends `boundary_disclaimer`. |
+| **5. Transactional SQLite Ledger & Payment Co-Storage (`persistentStore.ts`)** | Stores `ledger_events` and `payment_records` together in SQLite (`node:sqlite`, `WAL`, `synchronous=FULL`, `BEGIN IMMEDIATE`). Server-side integrity checks verify every entry using native `node:crypto` SHA-256 (matching RFC 8785 canonical JSON). Supports **Resume / Inspect** of persisted records across reloads and restarts. On startup, `recoverInFlightRecordsOnStartup()` transitions interrupted `RESERVED_ORDER` or `CAPTURE_PENDING` records to `UNKNOWN_RECONCILIATION_REQUIRED`. |
+| **6. Single-Instance Process Ownership Lock (`startServer`)** | Acquires `<sqliteDbPath>.server.pid` (`acquireSingleInstanceServerLock`) at startup so only **one Express process** runs per SQLite database file, preventing crash recovery from falsely flagging another active process's in-flight payments. |
+| **7. Strict PayPal Response Validation (`paypalSandbox.ts`)** | Enforces `https://api-m.sandbox.paypal.com`, exact Order ID, expected status (`CREATED`, `APPROVED`, `COMPLETED`), **exactly one** `purchase_unit`, `custom_id === receipt_hash`, `currency_code === 'EUR'`, `value === verified_amount_eur`, and **exactly one** `COMPLETED` capture record. |
+| **8. Exact Host & Origin Validation (`verifyExactHostAndOrigin`)** | Validates `Host` and `Origin` headers including scheme (`http:` / `https:`), hostname, and port (`:3000`). Wildcard `*.run.app` domains are rejected unless explicitly matching `APP_URL` or `TRUSTED_PREVIEW_ORIGIN`. |
+| **9. Isolated Negative Self-Test (`POST /api/redteam/isolated`)** | Executes 4 isolated negative checks in a temporary SQLite directory mapped to HTTP 403/400/409 equivalents—zero external network calls and zero main-ledger mutations. |
+
+### Pre-Existing vs. Hackathon Work Attribution
+- **Pre-existing SyntraVariga components (prior to hackathon revisions):** Cryptographic hash-chain kernel (`src/kernel/crypto.ts`, `ledger.ts`), canonical JSON test vectors, and the older Python snapshot in `reference_python/`.
+- **Hackathon-period development & hardening (`ai-studio/`):** React + TypeScript Jury UI (`src/App.tsx`, `src/components/`), invoice extraction/guard contracts & batch sample demo, Zero-PII Gemini explainer contract, SQLite ACID payment co-storage & single-instance PID lock, strict single-unit PayPal Sandbox REST/protocol state machine, Express security server (`server.ts`), and the multi-process crash/contention hardening test suite.
 
 ### Explicit Limitations: What This Prototype Does NOT Claim
-- **No Guarantee of Invoice Authenticity or Fraud Absence:** `FIELDS_CONSISTENT` only means the entered values satisfy the formal arithmetic and comparison rules.
-- **No Absolute Guarantee Against All Double Payments:** SQLite `BEGIN IMMEDIATE` reservations and `PayPal-Request-Id` headers prevent concurrent race conditions within this service, and `UNKNOWN_RECONCILIATION_REQUIRED` blocks automatic retries after timeouts or crashes, but cannot prevent external out-of-band payments.
-- **Hash Chain Scope:** The SHA-256 chain makes post-hoc edits to individual entries detectable, but someone with full write access to the local SQLite database file could recompute the chain from Genesis unless the head hash is anchored externally.
-- **API Keys & Billing:** A Google AI Studio API key is not automatically free of charge; external Gemini calls require explicit opt-in in the UI. In environments without configured external credentials, no live external Gemini or PayPal Sandbox calls occur.
+- **No Proof of Invoice Authenticity or Fraud Absence:** `FIELDS_CONSISTENT` only means entered values satisfy the formal arithmetic, supplier comparison, and duplicate rules. Discrepancy sample amounts are not proven financial savings or detected fraud.
+- **Single-Instance Supported Deployment:** Supported operation is strictly **one Express server process per SQLite database** (enforced by `acquireSingleInstanceServerLock`).
+- **No Absolute Guarantee Against Double Payments:** SQLite `BEGIN IMMEDIATE` reservations and `PayPal-Request-Id` headers mitigate concurrent race conditions on one receipt, and `UNKNOWN_RECONCILIATION_REQUIRED` blocks blind retries, but a newly sealed review receipt or external payout outside this app can still initiate a separate payment.
+- **Hash Chain Scope:** The SHA-256 chain makes post-hoc edits to individual rows detectable, but anyone with direct write access to the SQLite file could recompute the entire chain from Genesis unless `head_hash` is anchored externally.
+- **API Keys & Billing:** A Google AI Studio API key is not guaranteed free of charge; external Gemini calls never occur without explicit opt-in.
 
 ---
 
 ## 2. Quick Start for Judges
 
-### Current verification status
-
-Automated tests use simulations or mocked external responses. A live Gemini request and a completed PayPal Sandbox transaction have not been verified. Do not present this prototype as a submitted or production-ready system. Run only one server process per database: startup recovery cannot distinguish an interrupted operation from one still running in another process.
+### Current Verification Status
+- **Automated Verification (Verified Locally on Node 24.22.1 & Python 3.14):**
+  - `npm test`: **49 TypeScript tests passing** (including multi-process child-process SQLite crash recovery, contention race checks, strict PayPal response validation, exact host/origin rejection, and single-instance server lock tests). PayPal HTTP interactions in unit/integration tests use simulated or mocked Sandbox responses.
+  - `npm run test:python`: **7 Python reference tests passing** (`reference_python/`).
+  - `npm run lint`: **`tsc --noEmit` passing** with 0 errors.
+  - `npm run build`: **Vite production build passing** in 497 ms with 0 warnings.
+  - **Measured Local Benchmark (`600` ledger events):** `GET /api/ledger` reduced from `87.51 ms` to `40.25 ms` (-54%) and `POST /api/review` reduced from `173.50 ms` to `60.71 ms` (-65%) while keeping 100% end-to-end SHA-256 verification.
+- **External Live Verification Pending Credentials:**
+  - Live Google Gemini (`gemini-3.8-flash`) API call with real key: **not yet verified**.
+  - Live PayPal Sandbox REST end-to-end Order -> Test-Buyer Approval -> Capture: **not yet verified**.
 
 ### Prerequisites
-- **Node.js 24** and `npm` (verified with Node 24.22.1; Vite requires Node 22.12 or newer on the 22.x line)
-- **Python 3** $\ge 3.10$ (optional, to run the 7 original Python reference tests in `reference_python/`)
+- **Node.js 24** (`24.22.1` verified) and `npm`
+- **Python 3** $\ge 3.10$ (optional, for the 7 Python reference tests in `reference_python/`)
 
 ### Installation & Local Startup
 ```bash
+git clone -b feature/invoice-guard-public https://github.com/AhaWissenschaft/syntravariga-paypal-demo.git
+cd syntravariga-paypal-demo/ai-studio
 npm install
+npm run build
+NODE_ENV=production node --import tsx server.ts
+# Or development mode with Vite middleware:
 npm run dev
 ```
-By default, the server binds to `http://127.0.0.1:3000` (`http://localhost:3000`) and validates exact `Host` and `Origin` headers (including scheme and port).
+Default URL: `http://127.0.0.1:3000` (`http://localhost:3000`). Default ledger/SQLite database resides under the OS temporary directory (`os.tmpdir()/syntravariga_paypal_demo.jsonl[.sqlite]`, cross-platform Windows/Linux) unless overridden with `SYNTRA_DEMO_LEDGER`.
 
-### Optional Environment Variables (`.env`)
-Without external credentials, the app runs deterministically using local non-AI fallbacks and local PayPal Sandbox protocol simulation. To test with live external APIs, copy `.env.example` to `.env`:
+### Optional Live Sandbox & Gemini Environment Variables (`.env`)
+Without credentials, the application runs deterministically using local non-AI fallbacks and local PayPal Sandbox protocol simulation. To enable live APIs, copy `.env.example` to `.env` inside `ai-studio/` (never commit `.env`):
 ```bash
 GEMINI_API_KEY="your_gemini_api_key"
 GEMINI_MODEL_ID="gemini-3.8-flash"
@@ -65,13 +94,8 @@ PAYPAL_API_BASE="https://api-m.sandbox.paypal.com"
 
 ### Running All Automated Tests & Build Checks
 ```bash
-# Run all 47 TypeScript Kernel, SQLite ACID, Multi-Process Crash & Hardening Tests
-npm test
-
-# Run the 7 Original Python Reference Tests
-npm run test:python
-
-# TypeScript Typecheck & Production Build
-npm run lint
-npm run build
+npm test             # 49 TypeScript kernel, SQLite ACID, crash recovery & hardening tests
+npm run test:python  # 7 earlier Python reference tests
+npm run lint         # TypeScript strict typecheck (tsc --noEmit)
+npm run build        # Vite production bundle
 ```

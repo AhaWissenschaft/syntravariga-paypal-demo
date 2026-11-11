@@ -29,6 +29,8 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   loadAndVerifyPersistentLedger,
+  loadVerifiedLedgerSnapshot,
+  resolveSqliteDbPath,
   appendEventPersistently,
   PersistentPaymentStore,
   PaymentConcurrencyError,
@@ -41,7 +43,12 @@ import {
   PayPalSandboxManager,
   PayPalSandboxError,
 } from './paypalSandbox';
-import { createConfiguredExpressApp, verifyExactHostAndOrigin } from '../../server';
+import {
+  createConfiguredExpressApp,
+  verifyExactHostAndOrigin,
+  getLedgerFilePath,
+  acquireSingleInstanceServerLock,
+} from '../../server';
 
 function makeTempDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), `syntra-v14-${prefix}-`));
@@ -807,6 +814,93 @@ describe('Hardening Suite v1.4 (SQLite ACID Co-Storage, Multi-Process Crash Reco
       );
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('8. Uses os.tmpdir() default ledger path and enforces single-instance server lock per database', () => {
+    const tmpDir = makeTempDir('single-lock');
+    const prevEnvLedger = process.env.SYNTRA_DEMO_LEDGER;
+    const ledgerPath = path.join(tmpDir, 'audit_ledger.jsonl');
+    const lockPath = `${resolveSqliteDbPath(ledgerPath)}.server.pid`;
+
+    try {
+      delete process.env.SYNTRA_DEMO_LEDGER;
+      const resolvedDefault = getLedgerFilePath();
+      assert.equal(resolvedDefault, path.join(os.tmpdir(), 'syntravariga_paypal_demo.jsonl'));
+
+      process.env.SYNTRA_DEMO_LEDGER = ledgerPath;
+      assert.equal(getLedgerFilePath(), ledgerPath);
+
+      // Acquire lock as live process -> second acquire must fail explicitly
+      const release = acquireSingleInstanceServerLock(ledgerPath);
+      assert.ok(fs.existsSync(lockPath), 'Lockfile must be written on acquire');
+
+      assert.throws(
+        () => acquireSingleInstanceServerLock(ledgerPath),
+        /Single-instance database lock active/
+      );
+
+      release();
+      assert.ok(!fs.existsSync(lockPath), 'Lockfile must be removed on release');
+
+      // Stale lockfile from non-existent PID recovers cleanly
+      fs.writeFileSync(lockPath, '99999999\n', 'utf8');
+      const releaseRecovered = acquireSingleInstanceServerLock(ledgerPath);
+      assert.equal(fs.readFileSync(lockPath, 'utf8').trim(), String(process.pid));
+      releaseRecovered();
+    } finally {
+      if (prevEnvLedger === undefined) {
+        delete process.env.SYNTRA_DEMO_LEDGER;
+      } else {
+        process.env.SYNTRA_DEMO_LEDGER = prevEnvLedger;
+      }
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('9. Single-pass loadVerifiedLedgerSnapshot returns verified report & persisted payment records cleanly', () => {
+    const tmpDir = makeTempDir('snapshot');
+    const ledgerPath = path.join(tmpDir, 'audit_ledger.jsonl');
+
+    try {
+      const bootSnap = loadVerifiedLedgerSnapshot(ledgerPath);
+      assert.equal(bootSnap.events.length, 1);
+      assert.equal(bootSnap.report.status, 'PASS');
+      assert.deepEqual(bootSnap.paymentRecords, {});
+
+      const { newEvent: rev } = appendEventPersistently(ledgerPath, {
+        eventType: 'invoice_review',
+        payload: {
+          finding_codes: [],
+          status: 'FIELDS_CONSISTENT',
+          verified_amount_eur: '119.00',
+          verified_currency: 'EUR',
+        },
+      });
+
+      const store = new PersistentPaymentStore(ledgerPath);
+      store.reserveForOrderCreation({
+        receiptHash: rev.event_hash,
+        receiptIndex: rev.index,
+        verifiedAmountEur: '119.00',
+      });
+      const committed = store.confirmOrderCreated({
+        receiptHash: rev.event_hash,
+        orderId: 'SB-ORD-SNAP01',
+        approveUrl: 'https://www.sandbox.paypal.com/checkoutnow?token=SB-ORD-SNAP01',
+        executionMode: 'SANDBOX_PROTOCOL_SIMULATION',
+        appendLedgerEvent: true,
+      });
+
+      assert.equal(committed.report?.status, 'PASS');
+      assert.equal(committed.paymentRecords?.[rev.event_hash]?.order_id, 'SB-ORD-SNAP01');
+
+      const snapAfter = loadVerifiedLedgerSnapshot(ledgerPath);
+      assert.equal(snapAfter.events.length, 3);
+      assert.equal(snapAfter.report.status, 'PASS');
+      assert.equal(snapAfter.paymentRecords[rev.event_hash]?.state, 'ORDER_CREATED');
+    } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });

@@ -193,7 +193,7 @@ export function analyzeInvoice(
       findings.push({
         code: 'MISSING_FIELD',
         field,
-        message: `Pflichtfeld '${field}' fehlt oder ist leer.`,
+        message: `Mandatory field '${field}' is missing or empty.`,
       });
     }
   }
@@ -206,7 +206,7 @@ export function analyzeInvoice(
       code: 'VENDOR_MISMATCH',
       field: 'vendor',
       message:
-        'Der Lieferant auf der Rechnung stimmt nicht mit dem erwarteten Lieferanten der Bestellung überein. Bitte prüfen.',
+        'Supplier on invoice does not match the expected purchase order supplier. Please verify.',
     });
   }
 
@@ -221,7 +221,7 @@ export function analyzeInvoice(
     findings.push({
       code: 'EXPECTED_AMOUNT_MISMATCH',
       field: 'amount',
-      message: `Der Rechnungsbetrag (${formatCentsToEur(amountCents)} €) weicht um ${diffEur} € von der Bestellung (${formatCentsToEur(expAmountCents)} €) ab. Bitte prüfen.`,
+      message: `Billed invoice amount (${formatCentsToEur(amountCents)} EUR) differs by ${diffEur} EUR from the purchase order (${formatCentsToEur(expAmountCents)} EUR). Please verify.`,
     });
   }
 
@@ -230,7 +230,7 @@ export function analyzeInvoice(
       findings.push({
         code: 'TOTAL_MISMATCH',
         field: 'gross_amount',
-        message: `Netto plus Steuer (${formatCentsToEur(netCents + taxCents)} €) ergibt nicht den angegebenen Bruttobetrag (${formatCentsToEur(grossCents)} €). Bitte prüfen.`,
+        message: `Net plus tax (${formatCentsToEur(netCents + taxCents)} EUR) does not equal the stated gross amount (${formatCentsToEur(grossCents)} EUR). Please verify.`,
       });
     }
   }
@@ -239,7 +239,7 @@ export function analyzeInvoice(
     findings.push({
       code: 'TOTAL_MISMATCH',
       field: 'amount',
-      message: `Ausgewiesener Rechnungsbetrag (${formatCentsToEur(amountCents)} €) und Bruttobetrag (${formatCentsToEur(grossCents)} €) stimmen nicht überein. Bitte prüfen.`,
+      message: `Payment amount (${formatCentsToEur(amountCents)} EUR) does not match stated invoice gross amount (${formatCentsToEur(grossCents)} EUR). Please verify.`,
     });
   }
 
@@ -249,7 +249,7 @@ export function analyzeInvoice(
     findings.push({
       code: 'INVALID_INVOICE_NUMBER',
       field: 'invoice_number',
-      message: 'Rechnungsnummer überschreitet das Limit von 100 Zeichen.',
+      message: 'Invoice number exceeds the 100-character limit.',
     });
   }
 
@@ -264,7 +264,7 @@ export function analyzeInvoice(
     findings.push({
       code: 'DUPLICATE_INVOICE',
       field: 'invoice_number',
-      message: `Dubletten-Verdacht: Eine Rechnung mit dieser Referenz (${invoiceNumber}) desselben Lieferanten wurde bereits geprüft/erfasst. Doppelzahlung gesperrt.`,
+      message: `Duplicate reference detected: an invoice with reference '${invoiceNumber}' for the same supplier has already been verified. Duplicate payment blocked.`,
     });
   }
 
@@ -272,8 +272,8 @@ export function analyzeInvoice(
 
   const explanation =
     status === 'FIELDS_CONSISTENT'
-      ? 'Die eingegebenen Felder stimmen innerhalb der geprüften Regeln überein. Dies bestätigt nicht die Echtheit der Rechnung.'
-      : 'Abweichung oder unvollständige Angabe in den geprüften Feldern erkannt. Der Zahlungsweg bleibt für diesen Prüfvorgang gesperrt.';
+      ? 'Confirmed fields pass all deterministic arithmetic and purchase-order rules. This formal consistency check does not prove invoice authenticity.'
+      : 'Discrepancy or incomplete data detected in the confirmed fields. The downstream PayPal Sandbox payment path remains locked.';
 
   return {
     status,

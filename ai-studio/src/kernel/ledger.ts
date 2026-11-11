@@ -100,10 +100,15 @@ export function assertNoForbiddenPiiKeys(value: unknown, path = 'payload'): void
   }
 }
 
+export type CanonicalHasher = (value: unknown) => string;
+
 /**
  * Validates the cryptographic integrity of an array of ledger events.
  */
-export function verifyLedgerEvents(events: LedgerEvent[]): LedgerVerificationReport {
+export function verifyLedgerEvents(
+  events: LedgerEvent[],
+  hashFn: CanonicalHasher = sha256Canonical
+): LedgerVerificationReport {
   const errors: string[] = [];
   const hashes: string[] = [];
   let previousHash = GENESIS_HASH;
@@ -148,7 +153,7 @@ export function verifyLedgerEvents(events: LedgerEvent[]): LedgerVerificationRep
       payload = {};
     }
 
-    const computedPayloadHash = sha256Canonical(payload);
+    const computedPayloadHash = hashFn(payload);
     if (event.payload_sha256 !== computedPayloadHash) {
       errors.push(`event ${expectedIndex}: payload_sha256 mismatch`);
     }
@@ -161,7 +166,7 @@ export function verifyLedgerEvents(events: LedgerEvent[]): LedgerVerificationRep
 
     const unsigned = JSON.parse(JSON.stringify(event)) as Record<string, unknown>;
     delete unsigned.event_hash;
-    const computedEventHash = sha256Canonical(unsigned);
+    const computedEventHash = hashFn(unsigned);
 
     if (claimedEventHash !== computedEventHash) {
       errors.push(`event ${expectedIndex}: event_hash mismatch`);
@@ -191,9 +196,10 @@ export function appendEvent<T extends Record<string, unknown>>(
     eventType: string;
     timestamp?: string;
     payload: T;
-  }
+  },
+  hashFn: CanonicalHasher = sha256Canonical
 ): { updatedEvents: LedgerEvent[]; newEvent: LedgerEvent<T> } {
-  const report = verifyLedgerEvents(existingEvents);
+  const report = verifyLedgerEvents(existingEvents, hashFn);
   if (report.status !== 'PASS') {
     throw new LedgerError(`cannot append to invalid ledger: ${report.errors.join('; ')}`);
   }
@@ -216,7 +222,7 @@ export function appendEvent<T extends Record<string, unknown>>(
   const index = report.event_count + 1;
   const previousHash = report.event_count > 0 ? report.head_hash : GENESIS_HASH;
   const clonedPayload = JSON.parse(JSON.stringify(payload));
-  const payloadHash = sha256Canonical(clonedPayload);
+  const payloadHash = hashFn(clonedPayload);
 
   const unsigned = {
     schema: LEDGER_SCHEMA as typeof LEDGER_SCHEMA,
@@ -229,7 +235,7 @@ export function appendEvent<T extends Record<string, unknown>>(
     payload: clonedPayload,
   };
 
-  const eventHash = sha256Canonical(unsigned);
+  const eventHash = hashFn(unsigned);
 
   const newEvent: LedgerEvent<T> = {
     ...unsigned,
@@ -247,12 +253,13 @@ export function appendEvent<T extends Record<string, unknown>>(
  */
 export function verifyLedgerPrefix(
   events: LedgerEvent[],
-  prefix: { event_count: number; head_hash: string }
+  prefix: { event_count: number; head_hash: string },
+  hashFn: CanonicalHasher = sha256Canonical
 ): void {
   if (!Number.isInteger(prefix.event_count) || prefix.event_count < 1) {
     throw new LedgerError('ledger prefix event_count must be positive');
   }
-  const report = verifyLedgerEvents(events);
+  const report = verifyLedgerEvents(events, hashFn);
   if (report.status !== 'PASS') {
     throw new LedgerError(`ledger verification failed: ${report.errors.join('; ')}`);
   }
@@ -271,7 +278,8 @@ export function verifyLedgerPrefix(
  */
 export function verifyReceiptForOrder(
   events: LedgerEvent[],
-  receipt: { index: number; event_hash: string }
+  receipt: { index: number; event_hash: string },
+  preverifiedReport?: LedgerVerificationReport
 ): LedgerEvent {
   if (
     !receipt ||
@@ -284,7 +292,7 @@ export function verifyReceiptForOrder(
     throw new LedgerError('invalid receipt format');
   }
 
-  const report = verifyLedgerEvents(events);
+  const report = preverifiedReport ?? verifyLedgerEvents(events);
   if (
     report.status !== 'PASS' ||
     receipt.index < 1 ||

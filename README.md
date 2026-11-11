@@ -8,9 +8,10 @@ Experimental local prototype. It proposes fields from fictional invoice text, co
 
 Local automated tests pass with mocked payment/AI responses. A live AI call and an end-to-end PayPal Sandbox transaction have **not** been verified. The extraction fallback is deterministic and is not AI. The model provider determines charges: do not enable external calls without verifying cost and data terms. This project is not yet a verified contest submission.
 
-## AI Studio candidate
+## Hackathon Web Candidate (`ai-studio/` on `feature/invoice-guard-public`)
 
-The separately packaged React/TypeScript candidate is in `ai-studio/`. It preserves the Python demo below and has its own setup and tests. It uses mock or simulated external responses in automated tests; live AI and a completed PayPal Sandbox transaction remain unverified. Run only one candidate server per database. Review its source and privacy boundaries before publishing or using credentials.
+The React + TypeScript + Express + SQLite competition candidate is in [`ai-studio/`](ai-studio/README.md) on branch **[`feature/invoice-guard-public`](https://github.com/AhaWissenschaft/syntravariga-paypal-demo/tree/feature/invoice-guard-public/ai-studio)**.  
+It preserves the standalone Python demo below and has its own setup, UI, and 49 TypeScript hardening tests (+ 7 legacy `reference_python/` snapshot tests). Supported operation is one server process per SQLite database (enforced by a `.server.pid` lock). Live Gemini and completed end-to-end PayPal Sandbox credentials are tested separately from mocked test runs.
 
 ## Run
 

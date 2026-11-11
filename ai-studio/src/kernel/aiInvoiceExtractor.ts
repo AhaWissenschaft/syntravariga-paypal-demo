@@ -7,9 +7,9 @@
  * Translates free-form fictitious invoice text into structured field proposals
  * (`vendor`, `invoice_number`, `net_amount`, `tax_amount`, `gross_amount`, `amount`)
  * while surfacing explicit uncertainty flags:
- * - "Angabe nicht gefunden"
- * - "Mehrere mögliche Beträge gefunden"
- * - "Bitte manuell prüfen"
+ * - "Field not found"
+ * - "Multiple candidate amounts found"
+ * - "Manual review required"
  *
  * Architectural Boundary:
  * Output from this module is strictly a PROPOSAL (`requires_human_confirmation: true`).
@@ -49,74 +49,80 @@ export interface AiInvoiceExtractionResult {
 }
 
 /**
- * Built-in demo scenarios matching Section 3 & Section 4 of the Hackathon Plan.
+ * Built-in fictitious demo scenarios in English for hackathon judging.
  */
 export const INVOICE_TEXT_SCENARIOS = {
   sceneB_consistent: {
-    label: 'Szene B: Konsistentes Beispiel (119,00 EUR)',
+    label: 'Scenario B: Consistent Sample (119.00 EUR)',
     expected_vendor: 'Beispieltechnik GmbH',
     expected_amount: '119.00',
     raw_text: [
-      'Rechnung Nr. R-1042',
+      'Invoice No.: R-1042',
       '',
-      'Lieferant: Beispieltechnik GmbH',
-      'Leistung: Wartungspauschale Server-Rack Q4',
-      'Netto: 100,00 EUR',
-      'Umsatzsteuer (19%): 19,00 EUR',
-      'Gesamtbetrag: 119,00 EUR',
+      'Supplier: Beispieltechnik GmbH',
+      'Description: Server Rack Maintenance Fee Q4 (Fictitious Demo)',
+      'Net Amount: 100.00 EUR',
+      'VAT (19%): 19.00 EUR',
+      'Total Amount (Gross): 119.00 EUR',
     ].join('\n'),
   },
   sceneA_discrepancy: {
-    label: 'Szene A: Abweichung (Rechnung 149,00 € vs. Bestellung 119,00 €)',
+    label: 'Scenario A: Discrepancy (Invoice 149.00 EUR vs. Order 119.00 EUR)',
     expected_vendor: 'Beispieltechnik GmbH',
     expected_amount: '119.00',
     raw_text: [
-      'Rechnung Nr. R-1043',
+      'Invoice No.: R-1043',
       '',
-      'Lieferant: Beispieltechnik GmbH',
-      'Leistung: Wartungspauschale inkl. Express-Zuschlag',
-      'Netto: 125,21 EUR',
-      'Umsatzsteuer (19%): 23,79 EUR',
-      'Gesamtbetrag: 149,00 EUR',
+      'Supplier: Beispieltechnik GmbH',
+      'Description: Server Rack Maintenance incl. Unapproved Express Surcharge',
+      'Net Amount: 125.21 EUR',
+      'VAT (19%): 23.79 EUR',
+      'Total Amount (Gross): 149.00 EUR',
     ].join('\n'),
   },
   missingAmount: {
-    label: 'Edge-Case 1: Fehlende Angabe (Steuerbetrag fehlt)',
+    label: 'Edge Case 1: Missing Field (VAT Amount Missing)',
     expected_vendor: 'Beispieltechnik GmbH',
     expected_amount: '119.00',
     raw_text: [
-      'Rechnung Nr. R-1044',
+      'Invoice No.: R-1044',
       '',
-      'Lieferant: Beispieltechnik GmbH',
-      'Netto: 100,00 EUR',
-      'Umsatzsteuer: ---',
-      'Gesamtbetrag: 119,00 EUR',
+      'Supplier: Beispieltechnik GmbH',
+      'Net Amount: 100.00 EUR',
+      'VAT / Tax: ---',
+      'Total Amount (Gross): 119.00 EUR',
     ].join('\n'),
   },
   ambiguousTotals: {
-    label: 'Edge-Case 2: Mehrdeutige Gesamtbeträge im Text',
+    label: 'Edge Case 2: Conflicting Total Amounts in Invoice Text',
     expected_vendor: 'Beispieltechnik GmbH',
     expected_amount: '119.00',
     raw_text: [
-      'Rechnung Nr. R-1045',
+      'Invoice No.: R-1045',
       '',
-      'Lieferant: Beispieltechnik GmbH',
-      'Netto: 100,00 EUR',
-      'Umsatzsteuer: 19,00 EUR',
-      'Gesamtbetrag: 119,00 EUR',
-      'Zahlbetrag laut Nachtrag (Brutto): 149,00 EUR',
+      'Supplier: Beispieltechnik GmbH',
+      'Net Amount: 100.00 EUR',
+      'VAT (19%): 19.00 EUR',
+      'Total Amount (Gross): 119.00 EUR',
+      'Revised Payable Amount (Gross): 149.00 EUR',
     ].join('\n'),
   },
 };
 
 /**
- * Normalizes German or English currency strings like "119,00 EUR" or "1.250,50" -> "119.00" / "1250.50".
+ * Normalizes German or English currency strings like "119,00 EUR", "1.250,50", or "1,250.50" -> "119.00" / "1250.50".
  */
 export function normalizeExtractedAmount(raw: string): string {
   const cleaned = raw
     .replace(/EUR|€|\s/gi, '')
     .trim();
   if (!cleaned) return '';
+
+  // Handle English thousands comma + decimal dot (e.g. 1,250.50 -> 1250.50)
+  if (/^\d{1,3}(,\d{3})+\.\d{1,2}$/.test(cleaned)) {
+    const [whole, frac] = cleaned.replace(/,/g, '').split('.');
+    return `${whole}.${frac.padEnd(2, '0')}`;
+  }
 
   // Handle German thousands dot + decimal comma (e.g. 1.250,50 -> 1250.50)
   if (/^\d{1,3}(\.\d{3})+,\d{1,2}$/.test(cleaned)) {
@@ -141,15 +147,16 @@ export function normalizeExtractedAmount(raw: string): string {
 
 /**
  * Deterministic invoice text extractor & uncertainty auditor.
+ * Supports both English and German structured invoice text labels.
  * Used both as a safety guardrail on AI outputs (to guarantee missing/ambiguous amounts are never hidden)
- * and as a clearly labeled fallback if no external Gemini API key is configured.
+ * and as a clearly labeled non-AI fallback when external AI opt-in is off or no API key is configured.
  */
 export function extractInvoiceFieldsDeterministic(rawText: string): Omit<
   AiInvoiceExtractionResult,
   'provider_mode' | 'model_id' | 'proposal_sha256'
 > {
   if (typeof rawText !== 'string' || !rawText.trim()) {
-    throw new Error('Rechnungstext darf nicht leer sein.');
+    throw new Error('Invoice text must not be empty.');
   }
 
   const lines = rawText
@@ -164,16 +171,16 @@ export function extractInvoiceFieldsDeterministic(rawText: string): Omit<
   const grossCandidates: string[] = [];
 
   for (const line of lines) {
-    // Invoice number patterns
+    // Invoice number patterns (EN + DE)
     const invMatch = line.match(
-      /(?:Rechnung\s*(?:Nr\.?|Nummer)?|Invoice\s*(?:No\.?|#)?|Beleg(?:-Nr\.?)?)\s*[:#]?\s*([A-Za-z0-9._/-]{2,64})/i
+      /(?:Rechnung\s*(?:Nr\.?|Nummer)?|Invoice\s*(?:No\.?|Number|#)?|Beleg(?:-Nr\.?)?)\s*[:#]?\s*([A-Za-z0-9._/-]{2,64})/i
     );
     if (invMatch && !invoiceNumber) {
       invoiceNumber = invMatch[1].trim();
       continue;
     }
 
-    // Supplier / Vendor patterns
+    // Supplier / Vendor patterns (EN + DE)
     const vendorMatch = line.match(
       /(?:Lieferant|Aussteller|Rechnungssteller|Vendor|Supplier|Firma)\s*[:]\s*(.+)$/i
     );
@@ -182,9 +189,9 @@ export function extractInvoiceFieldsDeterministic(rawText: string): Omit<
       continue;
     }
 
-    // Net amount patterns
-    if (/(?:^|\b)(?:Netto|Nettobetrag|Net\s*Amount|Zwischensumme)/i.test(line)) {
-      const m = line.match(/(\d+(?:[.,]\d{1,2})?)\s*(?:EUR|€)?/i);
+    // Net amount patterns (EN + DE)
+    if (/(?:^|\b)(?:Netto|Nettobetrag|Net(?:\s*Amount)?|Subtotal|Zwischensumme)\b/i.test(line)) {
+      const m = line.match(/(\d[\d.,]*)\s*(?:EUR|€)?/i);
       if (m) {
         const norm = normalizeExtractedAmount(m[1]);
         if (norm) netCandidates.push(norm);
@@ -193,10 +200,11 @@ export function extractInvoiceFieldsDeterministic(rawText: string): Omit<
     }
 
     // Tax amount patterns (ignore percentage inside parentheses like "(19%)")
-    if (/(?:^|\b)(?:Umsatzsteuer|MwSt\.?|Steuer|Steuerbetrag|VAT|Tax)/i.test(line)) {
+    if (/(?:^|\b)(?:Umsatzsteuer|MwSt\.?|Steuer|Steuerbetrag|VAT|Tax)\b/i.test(line)) {
       const withoutPct = line.replace(/\(\s*\d+(?:[.,]\d+)?\s*%\s*\)/g, '');
-      const m = withoutPct.match(/[:]\s*(\d+(?:[.,]\d{1,2})?)\s*(?:EUR|€)?/i) ||
-        withoutPct.match(/(\d+[.,]\d{2})\s*(?:EUR|€)?/i);
+      const m =
+        withoutPct.match(/[:]\s*(\d[\d.,]*)\s*(?:EUR|€)?/i) ||
+        withoutPct.match(/(\d[\d.,]*\d)\s*(?:EUR|€)?/i);
       if (m) {
         const norm = normalizeExtractedAmount(m[1]);
         if (norm) taxCandidates.push(norm);
@@ -204,13 +212,13 @@ export function extractInvoiceFieldsDeterministic(rawText: string): Omit<
       continue;
     }
 
-    // Gross / Total amount patterns
+    // Gross / Total amount patterns (EN + DE)
     if (
-      /(?:^|\b)(?:Gesamtbetrag|Brutto|Bruttobetrag|Rechnungsbetrag|Zahlbetrag|Total|Gross)/i.test(
+      /(?:^|\b)(?:Gesamtbetrag|Brutto|Bruttobetrag|Rechnungsbetrag|Zahlbetrag|Total(?:\s*Amount)?|Payable(?:\s*Amount)?|Gross(?:\s*Amount)?)\b/i.test(
         line
       )
     ) {
-      const m = line.match(/(\d+(?:[.,]\d{1,2})?)\s*(?:EUR|€)?/i);
+      const m = line.match(/(\d[\d.,]*)\s*(?:EUR|€)?/i);
       if (m) {
         const norm = normalizeExtractedAmount(m[1]);
         if (norm) grossCandidates.push(norm);
@@ -234,38 +242,38 @@ export function extractInvoiceFieldsDeterministic(rawText: string): Omit<
   if (uniqueGross.length === 0) missingFields.push('gross_amount');
 
   if (missingFields.length > 0) {
-    warningSet.add('Angabe nicht gefunden');
-    warningSet.add('Bitte manuell prüfen');
+    warningSet.add('Field not found');
+    warningSet.add('Manual review required');
   }
 
   if (uniqueNet.length > 1) {
     ambiguousFields.push({
       field: 'net_amount',
       candidates: uniqueNet,
-      note: `Mehrere Nettobeträge im Text erkannt: ${uniqueNet.join(' EUR vs. ')} EUR`,
+      note: `Multiple net amounts detected in text: ${uniqueNet.join(' EUR vs. ')} EUR`,
     });
   }
   if (uniqueTax.length > 1) {
     ambiguousFields.push({
       field: 'tax_amount',
       candidates: uniqueTax,
-      note: `Mehrere Steuerbeträge im Text erkannt: ${uniqueTax.join(' EUR vs. ')} EUR`,
+      note: `Multiple tax amounts detected in text: ${uniqueTax.join(' EUR vs. ')} EUR`,
     });
   }
   if (uniqueGross.length > 1) {
     ambiguousFields.push({
       field: 'gross_amount',
       candidates: uniqueGross,
-      note: `Mehrere mögliche Gesamt-/Bruttobeträge im Text erkannt: ${uniqueGross.join(' EUR vs. ')} EUR`,
+      note: `Multiple conflicting total/gross amounts detected in text: ${uniqueGross.join(' EUR vs. ')} EUR`,
     });
   }
 
   if (ambiguousFields.length > 0) {
-    warningSet.add('Mehrere mögliche Beträge gefunden');
-    warningSet.add('Bitte manuell prüfen');
+    warningSet.add('Multiple candidate amounts found');
+    warningSet.add('Manual review required');
   }
 
-  // If gross is ambiguous, do NOT silently pick one as unambiguous; leave empty or require explicit selection
+  // If gross is ambiguous, do NOT silently pick one as unambiguous; leave empty to require explicit selection
   const grossVal = uniqueGross.length === 1 ? uniqueGross[0] : '';
   const netVal = uniqueNet.length === 1 ? uniqueNet[0] : '';
   const taxVal = uniqueTax.length === 1 ? uniqueTax[0] : '';
@@ -282,8 +290,8 @@ export function extractInvoiceFieldsDeterministic(rawText: string): Omit<
   const warnings = Array.from(warningSet);
   const extractorNotes =
     warnings.length === 0
-      ? 'Alle strukturierten Rechnungsfelder wurden eindeutig als Vorschlag erkannt. Bitte vor der Regelprüfung menschlich kontrollieren und bestätigen.'
-      : `Unsicherheiten erkannt (${warnings.join(' · ')}). Fehlende oder mehrdeutige Angaben wurden markiert und müssen vor der Regelprüfung manuell ergänzt bzw. entschieden werden.`;
+      ? 'All structured invoice fields were unambiguously proposed. Please verify and confirm manually before deterministic rule evaluation.'
+      : `Uncertainties detected (${warnings.join(' · ')}). Missing or ambiguous values were flagged and require manual completion or selection before rule evaluation.`;
 
   return {
     schema: 'aha.syntravariga.ai-invoice-proposal.v1',
@@ -305,19 +313,20 @@ export function buildAiInvoiceExtractionPrompt(rawText: string): {
   userPrompt: string;
 } {
   const systemInstruction = [
-    'Du bist ein präziser Extraktions-Assistent für Rechnungsentwürfe im SyntraVariga-Framework.',
-    'Deine Aufgabe ist es, aus einem eingegebenen fiktiven Rechnungstext strukturierte Felder vorzuschlagen:',
-    '- vendor (Lieferant)',
-    '- invoice_number (Rechnungsnummer)',
-    '- net_amount (Nettobetrag als Dezimalzahl mit Punkt, z. B. "100.00", oder "" falls fehlend/mehrdeutig)',
-    '- tax_amount (Steuerbetrag als Dezimalzahl mit Punkt, z. B. "19.00", oder "" falls fehlend/mehrdeutig)',
-    '- gross_amount (Brutto-/Gesamtbetrag als Dezimalzahl mit Punkt, z. B. "119.00", oder "" falls fehlend/mehrdeutig)',
-    '- amount (Rechnungsbetrag als Dezimalzahl mit Punkt, z. B. "119.00", oder "" falls fehlend/mehrdeutig)',
+    'You are a precision invoice-field extraction assistant in the SyntraVariga Invoice & Payment Guard framework.',
+    'Your task is to propose structured fields from a user-supplied fictitious invoice text (English or German):',
+    '- vendor (Supplier name)',
+    '- invoice_number (Invoice reference number)',
+    '- net_amount (Net amount as decimal string with dot, e.g. "100.00", or "" if missing/ambiguous)',
+    '- tax_amount (Tax/VAT amount as decimal string with dot, e.g. "19.00", or "" if missing/ambiguous)',
+    '- gross_amount (Total/Gross amount as decimal string with dot, e.g. "119.00", or "" if missing/ambiguous)',
+    '- amount (Payable invoice amount as decimal string with dot, e.g. "119.00", or "" if missing/ambiguous)',
     '',
-    'STRIKTE REGELN GEGEN HALLUZINATIONEN:',
-    '1. Erfinde NIEMALS Werte, die nicht im Text stehen.',
-    '2. Wenn eine Angabe fehlt, lasse das Feld leer ("") und füge in warnings exakt "Angabe nicht gefunden" sowie "Bitte manuell prüfen" hinzu.',
-    '3. Wenn im Text mehrere widersprüchliche Gesamt-/Bruttobeträge stehen, entscheide dich NICHT stillschweigend für einen, sondern lasse gross_amount/amount leer (""), liste die Kandidaten in ambiguous_fields auf und füge in warnings exakt "Mehrere mögliche Beträge gefunden" sowie "Bitte manuell prüfen" hinzu.',
+    'STRICT ANTI-HALLUCINATION RULES:',
+    '1. NEVER invent or infer values that are not explicitly stated in the text (for example, do not compute missing VAT from Net and Gross).',
+    '2. If any field is missing or marked "---" / "N/A", leave that field as "" and include "Field not found" and "Manual review required" in warnings.',
+    '3. If multiple conflicting gross/total amounts appear in the text, do NOT silently pick one; leave gross_amount and amount as "", and include "Multiple candidate amounts found" and "Manual review required" in warnings.',
+    '4. Respond with English extractor_notes summarizing what was extracted and what requires human review.',
   ].join('\n');
 
   return {

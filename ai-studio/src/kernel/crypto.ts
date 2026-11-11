@@ -131,12 +131,14 @@ const K = new Uint32Array([
   0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ]);
 
+const UTF8_ENCODER = new TextEncoder();
+
 /**
  * Computes the SHA-256 hash as a 64-character lowercase hexadecimal string.
  * Conforms to FIPS PUB 180-4.
  */
 export function sha256Hex(input: string | Uint8Array): string {
-  const bytes = typeof input === 'string' ? new TextEncoder().encode(input) : input;
+  const bytes = typeof input === 'string' ? UTF8_ENCODER.encode(input) : input;
   const bitLength = bytes.length * 8;
 
   // Pre-processing: padding
