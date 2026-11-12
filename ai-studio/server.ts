@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
   analyzeInvoice,
   analyzeInvoiceBatch,
@@ -131,7 +131,98 @@ export function hasValidGeminiApiKey(
   env: Record<string, string | undefined> = process.env
 ): boolean {
   const key = env.GEMINI_API_KEY?.trim();
-  return Boolean(key && key.startsWith('AIza') && key.length >= 30);
+  if (!key || key === 'MY_GEMINI_API_KEY' || /\s/.test(key) || key.length < 30) {
+    return false;
+  }
+  return key.startsWith('AIza') || key.startsWith('AQ.');
+}
+
+const GEMINI_FALLBACK_MODELS = [
+  'gemini-3.8-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-3.5-flash',
+  'gemini-3.1-flash-lite',
+];
+
+export function resolveGeminiModelSequence(
+  primaryModel = GEMINI_MODEL_ID,
+  fallbackListEnv = process.env.GEMINI_FALLBACK_MODELS
+): string[] {
+  const customFallbacks = (fallbackListEnv || '')
+    .split(',')
+    .map((m) => m.trim())
+    .filter(Boolean);
+  return Array.from(
+    new Set([primaryModel, ...customFallbacks, ...GEMINI_FALLBACK_MODELS].filter(Boolean))
+  );
+}
+
+function isRetryableGeminiModelError(message: string): boolean {
+  return (
+    message.includes('503') ||
+    message.includes('504') ||
+    message.includes('429') ||
+    message.includes('404') ||
+    message.includes('UNAVAILABLE') ||
+    message.includes('DEADLINE_EXCEEDED') ||
+    message.includes('RESOURCE_EXHAUSTED') ||
+    message.includes('NOT_FOUND') ||
+    message.includes('Thinking level') ||
+    message.includes('timeout') ||
+    message.includes('aborted')
+  );
+}
+
+function createGeminiClient(timeoutMs: number): GoogleGenAI {
+  return new GoogleGenAI({
+    apiKey: process.env.GEMINI_API_KEY,
+    httpOptions: {
+      timeout: timeoutMs,
+    },
+  });
+}
+
+async function generateStructuredGeminiJson<T>(options: {
+  systemInstruction: string;
+  userPrompt: string;
+  responseSchema: Record<string, unknown>;
+}): Promise<{ parsed: T; modelId: string }> {
+  const models = resolveGeminiModelSequence();
+  let lastErr: unknown;
+
+  for (let i = 0; i < models.length; i += 1) {
+    const modelId = models[i];
+    const timeoutMs = i === 0 ? 11000 : 15000;
+    try {
+      const ai = createGeminiClient(timeoutMs);
+      const response = await ai.models.generateContent({
+        model: modelId,
+        contents: options.userPrompt,
+        config: {
+          systemInstruction: options.systemInstruction,
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: 'application/json',
+          responseSchema: options.responseSchema,
+        },
+      });
+      const textOut = response.text;
+      if (!textOut) {
+        throw new Error(`Empty response from Gemini API (${modelId})`);
+      }
+      return {
+        parsed: JSON.parse(textOut) as T,
+        modelId,
+      };
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!isRetryableGeminiModelError(msg) || i === models.length - 1) {
+        throw err;
+      }
+    }
+  }
+
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 function collectVerifiedInvoiceDigests(events: LedgerEvent[]): Set<string> {
@@ -275,56 +366,8 @@ async function extractInvoiceWithAiOrFallback(
 
   if (allowExternalAi && hasValidGeminiApiKey()) {
     try {
-      const ai = new GoogleGenAI({
-        apiKey: process.env.GEMINI_API_KEY,
-        httpOptions: {
-          timeout: 15000,
-          headers: {
-            'User-Agent': 'aistudio-build',
-          },
-        },
-      });
       const { systemInstruction, userPrompt } = buildAiInvoiceExtractionPrompt(rawText);
-
-      const response = await ai.models.generateContent({
-        model: GEMINI_MODEL_ID,
-        contents: userPrompt,
-        config: {
-          systemInstruction,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              vendor: { type: Type.STRING },
-              invoice_number: { type: Type.STRING },
-              net_amount: { type: Type.STRING },
-              tax_amount: { type: Type.STRING },
-              gross_amount: { type: Type.STRING },
-              amount: { type: Type.STRING },
-              warnings: { type: Type.ARRAY, items: { type: Type.STRING } },
-              missing_fields: { type: Type.ARRAY, items: { type: Type.STRING } },
-              extractor_notes: { type: Type.STRING },
-            },
-            required: [
-              'vendor',
-              'invoice_number',
-              'net_amount',
-              'tax_amount',
-              'gross_amount',
-              'amount',
-              'warnings',
-              'missing_fields',
-              'extractor_notes',
-            ],
-          },
-        },
-      });
-
-      const textOut = response.text;
-      if (!textOut) {
-        throw new Error('Empty response from Gemini API');
-      }
-      const parsed = JSON.parse(textOut) as {
+      const { parsed, modelId } = await generateStructuredGeminiJson<{
         vendor: string;
         invoice_number: string;
         net_amount: string;
@@ -334,7 +377,35 @@ async function extractInvoiceWithAiOrFallback(
         warnings: string[];
         missing_fields: string[];
         extractor_notes: string;
-      };
+      }>({
+        systemInstruction,
+        userPrompt,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            vendor: { type: Type.STRING },
+            invoice_number: { type: Type.STRING },
+            net_amount: { type: Type.STRING },
+            tax_amount: { type: Type.STRING },
+            gross_amount: { type: Type.STRING },
+            amount: { type: Type.STRING },
+            warnings: { type: Type.ARRAY, items: { type: Type.STRING } },
+            missing_fields: { type: Type.ARRAY, items: { type: Type.STRING } },
+            extractor_notes: { type: Type.STRING },
+          },
+          required: [
+            'vendor',
+            'invoice_number',
+            'net_amount',
+            'tax_amount',
+            'gross_amount',
+            'amount',
+            'warnings',
+            'missing_fields',
+            'extractor_notes',
+          ],
+        },
+      });
 
       const aiMissingSet = new Set(parsed.missing_fields || []);
       const hasAmbiguousNet = baseline.ambiguous_fields.some((a) => a.field === 'net_amount');
@@ -407,7 +478,7 @@ async function extractInvoiceWithAiOrFallback(
       const unsigned: Omit<AiInvoiceExtractionResult, 'proposal_sha256'> = {
         schema: 'aha.syntravariga.ai-invoice-proposal.v1',
         provider_mode: 'LIVE_GEMINI_API',
-        model_id: GEMINI_MODEL_ID,
+        model_id: modelId,
         requires_human_confirmation: true,
         input_text_sha256: baseline.input_text_sha256,
         proposed_fields: proposedFields,
@@ -452,63 +523,44 @@ async function generatePrivacyPreservingAiExplanation(
 
   if (allowExternalAi && hasValidGeminiApiKey()) {
     try {
-      const ai = new GoogleGenAI({
-        apiKey: process.env.GEMINI_API_KEY,
-        httpOptions: {
-          timeout: 15000,
-          headers: {
-            'User-Agent': 'aistudio-build',
-          },
-        },
-      });
-      const response = await ai.models.generateContent({
-        model: GEMINI_MODEL_ID,
-        contents: userPrompt,
-        config: {
-          systemInstruction,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              executive_summary: { type: Type.STRING },
-              code_explanations: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    code: { type: Type.STRING },
-                    meaning: { type: Type.STRING },
-                    verification_step: { type: Type.STRING },
-                  },
-                  required: ['code', 'meaning', 'verification_step'],
-                },
-              },
-              human_audit_checklist: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-              },
-            },
-            required: ['executive_summary', 'code_explanations', 'human_audit_checklist'],
-          },
-        },
-      });
-
-      const rawText = response.text;
-      if (!rawText) {
-        throw new Error('Empty response from Gemini API');
-      }
-      const parsed = JSON.parse(rawText) as {
+      const { parsed, modelId } = await generateStructuredGeminiJson<{
         executive_summary: string;
         code_explanations: AiFindingDetail[];
         human_audit_checklist: string[];
-      };
+      }>({
+        systemInstruction,
+        userPrompt,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            executive_summary: { type: Type.STRING },
+            code_explanations: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  code: { type: Type.STRING },
+                  meaning: { type: Type.STRING },
+                  verification_step: { type: Type.STRING },
+                },
+                required: ['code', 'meaning', 'verification_step'],
+              },
+            },
+            human_audit_checklist: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+          },
+          required: ['executive_summary', 'code_explanations', 'human_audit_checklist'],
+        },
+      });
 
       const unsignedResult = enforceServerControlledAiExplanation(
         validatedReq,
         promptSha256,
         parsed,
         'LIVE_GEMINI_API',
-        GEMINI_MODEL_ID
+        modelId
       );
       const responseSha256 = sha256Canonical(unsignedResult);
       return {

@@ -48,6 +48,8 @@ import {
   verifyExactHostAndOrigin,
   getLedgerFilePath,
   acquireSingleInstanceServerLock,
+  hasValidGeminiApiKey,
+  resolveGeminiModelSequence,
 } from '../../server';
 
 function makeTempDir(prefix: string): string {
@@ -595,6 +597,10 @@ describe('Hardening Suite v1.4 (SQLite ACID Co-Storage, Multi-Process Crash Reco
 
     let simulateCaptureTimeout = false;
     class FaultInjectablePayPalManager extends PayPalSandboxManager {
+      constructor() {
+        super({ PAYPAL_API_BASE: 'https://api-m.sandbox.paypal.com' });
+      }
+
       public override async captureOrder(
         orderId: string,
         receiptHash: string,
@@ -903,5 +909,20 @@ describe('Hardening Suite v1.4 (SQLite ACID Co-Storage, Multi-Process Crash Reco
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  it('10. hasValidGeminiApiKey and resolveGeminiModelSequence support AIza*/AQ.* keys and deduplicated Flash fallbacks', () => {
+    assert.equal(hasValidGeminiApiKey({ GEMINI_API_KEY: '' }), false);
+    assert.equal(hasValidGeminiApiKey({ GEMINI_API_KEY: 'MY_GEMINI_API_KEY' }), false);
+    assert.equal(hasValidGeminiApiKey({ GEMINI_API_KEY: 'AIzaShortKey' }), false);
+    assert.equal(hasValidGeminiApiKey({ GEMINI_API_KEY: 'AQ.short' }), false);
+    assert.equal(hasValidGeminiApiKey({ GEMINI_API_KEY: 'AIza' + 'x'.repeat(35) }), true);
+    assert.equal(hasValidGeminiApiKey({ GEMINI_API_KEY: 'AQ.' + 'Ab8R'.repeat(12) }), true);
+    assert.equal(hasValidGeminiApiKey({ GEMINI_API_KEY: 'AQ.' + 'x'.repeat(30) + ' oops' }), false);
+
+    assert.deepEqual(
+      resolveGeminiModelSequence('gemini-3.8-flash', 'gemini-3.5-flash, gemini-3.8-flash'),
+      ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']
+    );
   });
 });

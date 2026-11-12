@@ -370,6 +370,14 @@ export class PayPalSandboxManager {
   private readonly simulatedOrders = new Map<string, PayPalSandboxOrder>();
   private orderCounter = 0;
 
+  constructor(private readonly forcedEnv?: Record<string, string | undefined>) {}
+
+  private resolveEnv(
+    env: Record<string, string | undefined>
+  ): Record<string, string | undefined> {
+    return this.forcedEnv ?? env;
+  }
+
   public validateReceiptHash(receiptHash: string): void {
     if (typeof receiptHash !== 'string' || !RECEIPT_HASH_RE.test(receiptHash)) {
       throw new ValueError('Invalid receipt hash');
@@ -398,18 +406,19 @@ export class PayPalSandboxManager {
     env: Record<string, string | undefined> = process.env,
     idempotencyKey?: string
   ): Promise<PayPalSandboxOrder> {
-    validateSandboxBaseUrl(env.PAYPAL_API_BASE);
+    const resolvedEnv = this.resolveEnv(env);
+    validateSandboxBaseUrl(resolvedEnv.PAYPAL_API_BASE);
     this.validateReceiptHash(receiptHash);
     this.validateVerifiedAmount(verifiedAmountEur);
 
     const requestId =
       idempotencyKey || `syntra-ord-${sha256Hex(`order:${receiptHash}`).slice(0, 32)}`;
 
-    if (hasLiveSandboxCredentials(env)) {
+    if (hasLiveSandboxCredentials(resolvedEnv)) {
       const raw = await requestLivePayPalSandbox(
         'POST',
         '/v2/checkout/orders',
-        env,
+        resolvedEnv,
         {
           intent: 'CAPTURE',
           purchase_units: [
@@ -434,7 +443,7 @@ export class PayPalSandboxManager {
       // If PayPal Create Order response includes purchase_units, validate strictly; otherwise fetch via GET to verify!
       const orderPayload = Array.isArray(raw.purchase_units)
         ? raw
-        : await requestLivePayPalSandbox('GET', `/v2/checkout/orders/${raw.id}`, env);
+        : await requestLivePayPalSandbox('GET', `/v2/checkout/orders/${raw.id}`, resolvedEnv);
 
       const verified = verifyStrictPayPalOrderPayload(orderPayload, {
         expectedOrderId: raw.id,
@@ -497,16 +506,17 @@ export class PayPalSandboxManager {
     expectedVerifiedAmountEur: string,
     env: Record<string, string | undefined> = process.env
   ): Promise<PayPalSandboxOrder> {
-    validateSandboxBaseUrl(env.PAYPAL_API_BASE);
+    const resolvedEnv = this.resolveEnv(env);
+    validateSandboxBaseUrl(resolvedEnv.PAYPAL_API_BASE);
     this.validateOrderId(orderId);
     this.validateReceiptHash(receiptHash);
     this.validateVerifiedAmount(expectedVerifiedAmountEur);
 
-    if (hasLiveSandboxCredentials(env) && !this.simulatedOrders.has(orderId)) {
+    if (hasLiveSandboxCredentials(resolvedEnv) && !this.simulatedOrders.has(orderId)) {
       const liveOrder = await requestLivePayPalSandbox(
         'GET',
         `/v2/checkout/orders/${orderId}`,
-        env
+        resolvedEnv
       );
       const verified = verifyStrictPayPalOrderPayload(liveOrder, {
         expectedOrderId: orderId,
@@ -580,7 +590,8 @@ export class PayPalSandboxManager {
     env: Record<string, string | undefined> = process.env,
     idempotencyKey?: string
   ): Promise<PayPalSandboxOrder> {
-    validateSandboxBaseUrl(env.PAYPAL_API_BASE);
+    const resolvedEnv = this.resolveEnv(env);
+    validateSandboxBaseUrl(resolvedEnv.PAYPAL_API_BASE);
     this.validateOrderId(orderId);
     this.validateReceiptHash(receiptHash);
     this.validateVerifiedAmount(expectedVerifiedAmountEur);
@@ -589,11 +600,11 @@ export class PayPalSandboxManager {
       idempotencyKey ||
       `syntra-cap-${sha256Hex(`capture:${receiptHash}:${orderId}`).slice(0, 32)}`;
 
-    if (hasLiveSandboxCredentials(env) && !this.simulatedOrders.has(orderId)) {
+    if (hasLiveSandboxCredentials(resolvedEnv) && !this.simulatedOrders.has(orderId)) {
       const preCheck = await requestLivePayPalSandbox(
         'GET',
         `/v2/checkout/orders/${orderId}`,
-        env
+        resolvedEnv
       );
       verifyStrictPayPalOrderPayload(preCheck, {
         expectedOrderId: orderId,
@@ -605,7 +616,7 @@ export class PayPalSandboxManager {
       const rawCapture = await requestLivePayPalSandbox(
         'POST',
         `/v2/checkout/orders/${orderId}/capture`,
-        env,
+        resolvedEnv,
         {},
         requestId
       );
