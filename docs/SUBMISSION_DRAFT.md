@@ -1,6 +1,6 @@
 # SyntraVariga Invoice & Payment Guard — Devpost Submission Draft (`1296728`)
 
-> **Status Note (Draft for Owner Review):** Existing Devpost draft ID `1296728` (`1/5 steps done`, `Untitled`) is still blank and **not submitted**. Do not upload a video or click Submit until the project owner reviews the final app, runs/verifies live Gemini + live PayPal Sandbox end-to-end, and approves this text.
+> **Status Note (Ready for Owner Review & Video):** Code, 50 TS + 7 Python tests, live Gemini calls, and live PayPal Sandbox end-to-end capture/persistence are verified. Existing Devpost draft ID `1296728` (`1/5 steps done`) has not been submitted yet. Pre-fill draft fields and attach the approved `<3 min` YouTube `Unlisted` video link before clicking Submit.
 
 ---
 
@@ -34,7 +34,7 @@ Small businesses and freelancers regularly verify incoming supplier invoices by 
 
 ## How we built it
 - **Frontend (`ai-studio/src/`):** React 19, TypeScript, Tailwind CSS, Lucide icons, WCAG contrast & keyboard-accessible Audit Ledger explorer, mobile-responsive layout, and persistent SQLite payment resume/reconciliation views.
-- **Backend & Persistence (`ai-studio/server.ts`, `persistentStore.ts`):** Node 24 (`node:sqlite` WAL + native `node:crypto` SHA-256), Express with exact `scheme://host:port` validation and single-instance PID locking (`acquireSingleInstanceServerLock`), strict single-unit PayPal response verification (`paypalSandbox.ts`), and 15-second request timeouts on external Gemini requests.
+- **Backend & Persistence (`ai-studio/server.ts`, `persistentStore.ts`):** Node 24 (`node:sqlite` WAL + native `node:crypto` SHA-256), Express with exact `scheme://host:port` validation and single-instance PID locking (`acquireSingleInstanceServerLock`), strict PayPal response verification (`paypalSandbox.ts`), and bounded request timeouts with resilient Flash model failover on external Gemini requests.
 
 ## Challenges we ran into & Honest Boundaries
 - **No magic AI claims:** LLMs can misread numbers or hallucinate missing VAT fields. Blocking placeholders and keeping payment locks purely deterministic prevented prompt or model quirks from unlocking checkout.
@@ -42,9 +42,11 @@ Small businesses and freelancers regularly verify incoming supplier invoices by 
 - **Explicit non-claims:** Passing deterministic rules confirms internal arithmetic and purchase-order consistency on user-confirmed fields—it is not proof of legal invoice authenticity, supplier identity verification, or absolute prevention of out-of-band double payments.
 
 ## Accomplishments & Verification
-- **Automated Test Matrix:** 49 TypeScript tests (`npm test`—including multi-process child crash recovery, concurrent SQLite lock race checks, PayPal response validation, exact host/origin checks, and end-to-end HTTP lifecycle with mocked external adapters) + 7 reference Python tests (`npm run test:python`), passing `tsc --noEmit` and Vite production build (0 warnings).
-- **Performance Optimization:** Replaced repeated pure-JS full-ledger passes with single-transaction native `node:crypto` verification (`600` events: `GET /api/ledger` `87.51 ms -> 40.25 ms`, `POST /api/review` `173.50 ms -> 60.71 ms`).
-- **Live External APIs:** *[Update status here after final user-verified live Gemini 3.8 Flash and PayPal Sandbox REST tests].*
+- **Automated Test Matrix:** 50 TypeScript tests (`npm test`—including multi-process child crash recovery, concurrent SQLite lock race checks, `AIza*`/`AQ.*` key & Flash failover checks, PayPal response validation, exact host/origin checks, and isolated HTTP end-to-end lifecycle) + 7 reference Python tests (`npm run test:python`), passing `tsc --noEmit` and Vite production build (0 warnings).
+- **Performance Optimization:** Replaced repeated pure-JS full-ledger passes with single-transaction native `node:crypto` verification (`600` events: `GET /api/ledger` `87.51 ms -> 34.78 ms`, `POST /api/review` `173.50 ms -> 51.34 ms`).
+- **Live External APIs Verified (Fictitious Data Only):**
+  - **Google Gemini (`LIVE_GEMINI_API`):** Verified live `/api/ai/extract` and zero-PII `/api/ai/explain` calls via `AQ.*` auth key; automatic capacity failover succeeded on `gemini-3.5-flash-lite` when `gemini-3.8-flash` hit transient `503`/`504` limits and recorded the active `model_id` in SQLite.
+  - **PayPal Sandbox REST (`LIVE_PAYPAL_SANDBOX_REST`, `https://api-m.sandbox.paypal.com`):** Verified live Sandbox order `8DH65564PK409905U` (`119.00 EUR`, bound to verified receipt via `custom_id`), real DE Sandbox Personal test-buyer approval, captured settlement (`3ND85370G4181781M`, `COMPLETED`, `119.00 EUR`), reconciliation handling, and SQLite state persistence across full server restart (`LEDGER: PASS`).
 
 ## What we learned & What's next
 Separating probabilistic AI extraction from deterministic financial state machines makes AI workflows auditable. Next steps include external head-hash anchoring, multi-currency invoice rules, and webhook reconciliation with merchant accounting ledgers.
@@ -56,21 +58,20 @@ Separating probabilistic AI extraction from deterministic financial state machin
 ### "Try it out" Links
 1. **Competition Branch (`ai-studio/` Web App):** `https://github.com/AhaWissenschaft/syntravariga-paypal-demo/tree/feature/invoice-guard-public/ai-studio`
 2. **Branch Root:** `https://github.com/AhaWissenschaft/syntravariga-paypal-demo/tree/feature/invoice-guard-public`
-3. *(Optional if desired by owner)* **Google AI Studio Concept Prototype:** `https://aistudio.google.com/apps/fb752fd4-0c7d-4620-8e94-92aae07aedf2`
 
 ### Demonstration Video (YouTube)
-- **Allowed Visibility on Devpost (`project_details/edit` & Rules):** Set to **Unlisted** (or **Public**) with no password, strictly **< 3 minutes** (official rule notes Judges are not required to watch past 3:00 and `/rules` mentions publicly visible on YouTube—Devpost form explicitly states `"Visibility: Set to public or unlisted with no password."`).
+- **Selected Visibility:** **Unlisted** with no password, strictly **< 3 minutes** (explicitly permitted on Devpost's submission form: `"Visibility: Set to public or unlisted with no password."`, `"Only the first 3 minutes will be reviewed"`).
 
 ---
 
 ## 3. Devpost Step 4 — Additional Info (`/additional-info/edit`)
 
-- **Submitter Type:** `[Owner choice — e.g. Individual]`
-- **Country of Residence:** `[Owner choice]`
+- **Submitter Type:** `Individual`
+- **Country of Residence:** `Germany` *(enter directly in Devpost form; avoid personal details beyond required dropdown)*
 - **Is your project new, or did it exist before Oct 1, 2026 (9:15 am PT)?**  
-  **Yes — Existing project significantly updated during the Hackathon Submission Period** *(confirm exact creation dates with owner before selecting).*
+  `Yes — Existing project significantly updated during the Hackathon Submission Period`
 - **If it existed before, explain what already existed and what you built or changed during the Hackathon Submission Period:**  
-  `Pre-existing SyntraVariga foundations included the core RFC 8785 canonical JSON & SHA-256 hash-chain primitives (crypto.ts / ledger.ts) and earlier Python proof-of-concept components. During the hackathon period on branch feature/invoice-guard-public (inside ai-studio/), we built and hardened the React + TypeScript Jury UI, deterministic English/German invoice extraction guardrails & uncertainty flags, Zero-PII Gemini (gemini-3.8-flash) explainer boundary, transactional SQLite ACID co-storage (ledger_events + payment_records), startup in-flight crash recovery, strict single-unit PayPal Sandbox validation (order -> explicit buyer approval -> capture -> timeout reconciliation), single-instance server PID lock, and the 49-test TypeScript hardening & multi-process test suite.`
+  `Pre-existing SyntraVariga foundations included the general RFC 8785 canonical JSON & SHA-256 hash-ledger and contract primitives (aha_lab/ledger.py, aha_lab/contracts.py) alongside the TypeScript kernel port (crypto.ts, ledger.ts). During the hackathon submission period on branch feature/invoice-guard-public (inside ai-studio/), we built and hardened the entire React + TypeScript Jury web application, deterministic English/German invoice extraction guardrails & uncertainty flags, Zero-PII Gemini (gemini-3.8-flash + resilient Flash failover) explainer boundary, transactional SQLite ACID co-storage (ledger_events + payment_records), startup crash recovery, strict PayPal Sandbox REST integration (order -> explicit buyer approval -> capture -> reconciliation -> return_url redirect), single-instance PID lock, and the 50-test TypeScript hardening suite.`
 - **Explain how your project meets the main technology requirement (PayPal + AI):**  
   `SyntraVariga pairs Google Gemini (gemini-3.8-flash, explicit opt-in) for unstructured invoice-field extraction and privacy-preserving finding explanations (transmitting only finding codes, zero PII) with a PayPal Sandbox REST integration (https://api-m.sandbox.paypal.com/v2/checkout/orders) where only server-verified invoice totals bound in SQLite can create, buyer-approve, and capture EUR Sandbox orders.`
 - **Public Code Repository URL:**  
@@ -83,7 +84,7 @@ Separating probabilistic AI extraction from deterministic financial state machin
   2. cd syntravariga-paypal-demo/ai-studio && npm install && npm run dev
   3. Open http://127.0.0.1:3000 in your browser (runs with deterministic local fallbacks & Sandbox simulation out of the box—no API keys required to test full workflow).
   4. Optional live API testing: copy .env.example to .env and supply your own GEMINI_API_KEY and PayPal Sandbox PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET + Sandbox Buyer test account.
-  5. Run automated tests: `npm test` (49 TS tests), `npm run test:python` (7 Python tests), `npm run lint`, `npm run build`.
+  5. Run automated tests: `npm test` (50 TS tests), `npm run test:python` (7 Python tests), `npm run lint`, `npm run build`.
   ```
 
 ---

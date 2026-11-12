@@ -229,11 +229,6 @@ export function verifyStrictPayPalCapturePayload(
   if (!u || typeof u !== 'object') {
     throw new PayPalSandboxError('Capture purchase_unit[0] is missing');
   }
-  if (u.custom_id !== expected.expectedReceiptHash) {
-    throw new PayPalSandboxError(
-      'Capture purchase_unit[0].custom_id is missing or does not match verified receipt_hash'
-    );
-  }
   const payments = u.payments as Record<string, unknown> | undefined;
   const captures = payments?.captures;
   if (!Array.isArray(captures) || captures.length !== 1) {
@@ -244,6 +239,26 @@ export function verifyStrictPayPalCapturePayload(
   const cap = captures[0] as Record<string, unknown>;
   if (!cap || typeof cap !== 'object') {
     throw new PayPalSandboxError('Capture record [0] is invalid');
+  }
+  const unitCustomId = u.custom_id;
+  const capCustomId = cap.custom_id;
+  if (unitCustomId !== undefined && unitCustomId !== expected.expectedReceiptHash) {
+    throw new PayPalSandboxError(
+      'Capture purchase_unit[0].custom_id is missing or does not match verified receipt_hash'
+    );
+  }
+  if (capCustomId !== undefined && capCustomId !== expected.expectedReceiptHash) {
+    throw new PayPalSandboxError(
+      'Capture purchase_unit[0].custom_id is missing or does not match verified receipt_hash'
+    );
+  }
+  if (
+    unitCustomId !== expected.expectedReceiptHash &&
+    capCustomId !== expected.expectedReceiptHash
+  ) {
+    throw new PayPalSandboxError(
+      'Capture purchase_unit[0].custom_id is missing or does not match verified receipt_hash'
+    );
   }
   if (typeof cap.id !== 'string' || !ORDER_ID_RE.test(cap.id)) {
     throw new PayPalSandboxError('Capture record [0] is missing a valid id');
@@ -404,7 +419,8 @@ export class PayPalSandboxManager {
     receiptHash: string,
     verifiedAmountEur: string,
     env: Record<string, string | undefined> = process.env,
-    idempotencyKey?: string
+    idempotencyKey?: string,
+    returnUrls?: { returnUrl?: string; cancelUrl?: string }
   ): Promise<PayPalSandboxOrder> {
     const resolvedEnv = this.resolveEnv(env);
     validateSandboxBaseUrl(resolvedEnv.PAYPAL_API_BASE);
@@ -431,6 +447,8 @@ export class PayPalSandboxManager {
           application_context: {
             user_action: 'PAY_NOW',
             shipping_preference: 'NO_SHIPPING',
+            ...(returnUrls?.returnUrl ? { return_url: returnUrls.returnUrl } : {}),
+            ...(returnUrls?.cancelUrl ? { cancel_url: returnUrls.cancelUrl } : {}),
           },
         },
         requestId
@@ -621,17 +639,24 @@ export class PayPalSandboxManager {
         requestId
       );
 
-      // If capture response omits custom_id in purchase_units[0], verify against the preCheck custom_id only if preCheck already matched receiptHash
+      // Live PayPal POST /capture often returns custom_id inside payments.captures[0] instead of
+      // purchase_units[0]. If neither carries custom_id in the POST /capture body, query the authoritative
+      // GET /v2/checkout/orders/{id} record rather than abandoning a completed capture into manual lock.
       const captureUnits = Array.isArray(rawCapture.purchase_units)
         ? (rawCapture.purchase_units as Array<Record<string, unknown>>)
         : [];
-      if (captureUnits.length === 1 && captureUnits[0] && captureUnits[0].custom_id === undefined) {
-        throw new PayPalSandboxError(
-          'Capture response purchase_unit[0].custom_id is missing; refusing to substitute expected value'
-        );
-      }
+      const firstUnit = captureUnits[0];
+      const firstPayments = firstUnit?.payments as Record<string, unknown> | undefined;
+      const firstCapture = Array.isArray(firstPayments?.captures)
+        ? (firstPayments.captures as Array<Record<string, unknown>>)[0]
+        : undefined;
+      const hasServerReturnedCustomId =
+        firstUnit?.custom_id !== undefined || firstCapture?.custom_id !== undefined;
+      const capturePayload = hasServerReturnedCustomId
+        ? rawCapture
+        : await requestLivePayPalSandbox('GET', `/v2/checkout/orders/${orderId}`, resolvedEnv);
 
-      const verifiedCapture = verifyStrictPayPalCapturePayload(rawCapture, {
+      const verifiedCapture = verifyStrictPayPalCapturePayload(capturePayload, {
         expectedOrderId: orderId,
         expectedReceiptHash: receiptHash,
         expectedAmountEur: expectedVerifiedAmountEur,

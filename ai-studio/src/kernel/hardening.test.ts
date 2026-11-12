@@ -534,6 +534,35 @@ describe('Hardening Suite v1.4 (SQLite ACID Co-Storage, Multi-Process Crash Reco
         ),
       /exactly 1 capture record/
     );
+
+    // 4f. PayPal live POST /capture placing custom_id on captures[0] (without outer unit custom_id) is accepted strictly
+    const validCaptureWithCapCustomId = verifyStrictPayPalCapturePayload(
+      {
+        id: 'SB-ORD-12345',
+        status: 'COMPLETED',
+        purchase_units: [
+          {
+            payments: {
+              captures: [
+                {
+                  id: '3ND85370G4181781M',
+                  status: 'COMPLETED',
+                  custom_id: validHash,
+                  amount: { currency_code: 'EUR', value: '119.00' },
+                },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        expectedOrderId: 'SB-ORD-12345',
+        expectedReceiptHash: validHash,
+        expectedAmountEur: '119.00',
+      }
+    );
+    assert.equal(validCaptureWithCapCustomId.captureId, '3ND85370G4181781M');
+    assert.equal(validCaptureWithCapCustomId.unit.custom_id, validHash);
   });
 
   it('5. Exact Host & Origin Verification rejects arbitrary *.run.app, wrong scheme, and wrong port, allowing only exact configured matches', () => {

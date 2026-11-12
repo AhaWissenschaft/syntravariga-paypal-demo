@@ -940,11 +940,21 @@ export function createConfiguredExpressApp(
       });
       reservedReceiptHash = receipt.event_hash;
 
+      const verifiedOrigin =
+        typeof req.headers.origin === 'string' && req.headers.origin.startsWith('http')
+          ? req.headers.origin.replace(/\/+$/, '')
+          : undefined;
       const order = await paypalManager.createOrder(
         receipt.event_hash,
         verifiedAmountEur,
         process.env,
-        reservation.order_idempotency_key
+        reservation.order_idempotency_key,
+        verifiedOrigin
+          ? {
+              returnUrl: `${verifiedOrigin}/?paypal_sandbox_return=approved`,
+              cancelUrl: `${verifiedOrigin}/?paypal_sandbox_return=cancel`,
+            }
+          : undefined
       );
 
       // Single ACID SQLite transaction commits both `ORDER_CREATED` state AND `paypal_sandbox_order` ledger event!

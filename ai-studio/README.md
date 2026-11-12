@@ -41,8 +41,8 @@ Small businesses and freelancers often inspect incoming supplier invoices manual
 | **9. Isolated Negative Self-Test (`POST /api/redteam/isolated`)** | Executes 4 isolated negative checks in a temporary SQLite directory mapped to HTTP 403/400/409 equivalents—zero external network calls and zero main-ledger mutations. |
 
 ### Pre-Existing vs. Hackathon Work Attribution
-- **Pre-existing SyntraVariga components (prior to hackathon revisions):** Cryptographic hash-chain kernel (`src/kernel/crypto.ts`, `ledger.ts`), canonical JSON test vectors, and the older Python snapshot in `reference_python/`.
-- **Hackathon-period development & hardening (`ai-studio/`):** React + TypeScript Jury UI (`src/App.tsx`, `src/components/`), invoice extraction/guard contracts & batch sample demo, Zero-PII Gemini explainer contract, SQLite ACID payment co-storage & single-instance PID lock, strict single-unit PayPal Sandbox REST/protocol state machine, Express security server (`server.ts`), and the multi-process crash/contention hardening test suite.
+- **Pre-existing SyntraVariga components (prior to hackathon submission period):** Core cryptographic hash-chain and contract primitives (`aha_lab/ledger.py`, `aha_lab/contracts.py`), canonical JSON test vectors, and the older Python snapshot in `reference_python/`.
+- **Hackathon-period development & hardening (`ai-studio/`):** React + TypeScript Jury UI (`src/App.tsx`, `src/components/`), invoice extraction/guard contracts & batch sample demo, Zero-PII Gemini explainer contract & automatic Flash fallback resilience (`AQ.*` & `AIza*` keys), SQLite ACID payment co-storage & single-instance PID lock, strict single-unit PayPal Sandbox REST/protocol state machine, Express security server (`server.ts`), and the 50-test TypeScript hardening & multi-process test suite.
 
 ### Explicit Limitations: What This Prototype Does NOT Claim
 - **No Proof of Invoice Authenticity or Fraud Absence:** `FIELDS_CONSISTENT` only means entered values satisfy the formal arithmetic, supplier comparison, and duplicate rules. Discrepancy sample amounts are not proven financial savings or detected fraud.
@@ -56,18 +56,18 @@ Small businesses and freelancers often inspect incoming supplier invoices manual
 ## 2. Quick Start for Judges
 
 ### Current Verification Status
-- **Automated Verification (Verified Locally on Node 24.22.1 & Python 3.14):**
-  - `npm test`: **49 TypeScript tests passing** (including multi-process child-process SQLite crash recovery, contention race checks, strict PayPal response validation, exact host/origin rejection, and single-instance server lock tests). PayPal HTTP interactions in unit/integration tests use simulated or mocked Sandbox responses.
+- **Automated Offline Verification (Node `v24.18.0` & Python `3.14`):**
+  - `npm test`: **50 TypeScript tests passing** (including multi-process child-process SQLite crash recovery, contention race checks, strict PayPal response validation, exact host/origin rejection, `AIza*`/`AQ.*` key validation, and single-instance server lock tests). Isolated unit/integration tests use mocked/simulated adapters even if `.env` is configured locally.
   - `npm run test:python`: **7 Python reference tests passing** (`reference_python/`).
   - `npm run lint`: **`tsc --noEmit` passing** with 0 errors.
-  - `npm run build`: **Vite production build passing** in 497 ms with 0 warnings.
-  - **Measured Local Benchmark (`600` ledger events):** `GET /api/ledger` reduced from `87.51 ms` to `40.25 ms` (-54%) and `POST /api/review` reduced from `173.50 ms` to `60.71 ms` (-65%) while keeping 100% end-to-end SHA-256 verification.
-- **External Live Verification Pending Credentials:**
-  - Live Google Gemini (`gemini-3.8-flash`) API call with real key: **not yet verified**.
-  - Live PayPal Sandbox REST end-to-end Order -> Test-Buyer Approval -> Capture: **not yet verified**.
+  - `npm run build`: **Vite production build passing** with 0 warnings.
+  - **Measured Local Benchmark (`600` ledger events):** `GET /api/ledger` reduced from `87.51 ms` to `34.78 ms` and `POST /api/review` reduced from `173.50 ms` to `51.34 ms` while keeping 100% end-to-end SHA-256 verification.
+- **Live External API Verification (Executed with Fictitious Data):**
+  - **Live Google Gemini API (`LIVE_GEMINI_API`):** Authenticated live calls to `/api/ai/extract` (`119.00 EUR` fictional invoice) and Zero-PII `/api/ai/explain` (`REVIEW_REQUIRED`, `["EXPECTED_AMOUNT_MISMATCH"]`) succeeded via modern `AQ.*` key; when `gemini-3.8-flash` hit transient `503`/`504` high-demand limits, resilient Flash failover succeeded on `gemini-3.5-flash-lite` and logged the exact `model_id` in the audit ledger.
+  - **Live PayPal Sandbox REST (`LIVE_PAYPAL_SANDBOX_REST`, `https://api-m.sandbox.paypal.com`):** Real Sandbox Order **`8DH65564PK409905U`** (`119.00 EUR`, `custom_id` = receipt hash) was created -> buyer-approved by a `DE` Sandbox Personal test buyer -> captured at PayPal (**Capture ID `3ND85370G4181781M`**, `status: COMPLETED`, `119.00 EUR`) -> verified reconciled into SQLite `COMPLETED` -> persisted cleanly across full server restart (`LEDGER: PASS`). Live testing also uncovered and fixed two real-world PayPal API quirks (`captures[0].custom_id` parsing on `POST /capture` and `return_url` redirect context).
 
 ### Prerequisites
-- **Node.js 24** (`24.22.1` verified) and `npm`
+- **Node.js 24** (`v24.18.0` verified) and `npm`
 - **Python 3** $\ge 3.10$ (optional, for the 7 Python reference tests in `reference_python/`)
 
 ### Installation & Local Startup
