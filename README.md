@@ -18,7 +18,7 @@ Experimental local prototype. It proposes fields from fictional invoice text, co
 
 ## Status
 
-Local automated tests pass with mocked payment/AI responses. A live AI call and an end-to-end PayPal Sandbox transaction have **not** been verified. The extraction fallback is deterministic and is not AI. The model provider determines charges: do not enable external calls without verifying cost and data terms. This project is not yet a verified contest submission.
+Local automated tests for the standalone Python prototype pass with mocked payment/AI responses. Live AI and end-to-end PayPal Sandbox verification are **not** claimed for this standalone Python prototype. The **submitted React/TypeScript competition application** in [`feature/invoice-guard-public/ai-studio`](https://github.com/AhaWissenschaft/syntravariga-paypal-demo/tree/feature/invoice-guard-public/ai-studio) separately documents verified live Gemini and PayPal Sandbox integration. The Python extraction fallback is deterministic and is not AI. The model provider determines charges: do not enable external calls without verifying cost and data terms.
 
 ## Run
 
@@ -45,4 +45,4 @@ The locally generated receipt is a checksum-based reference, not proof of invoic
 
 ## Competition and attribution
 
-The project combines an existing SyntraVariga hash-chain component with an experimental invoice checking and Sandbox checkout demo. Exact prior creation dates and competition eligibility must be substantiated. The contest requires meaningful PayPal and AI use, a working demo, open-source repository and a YouTube demo; see https://paypalaihackathon.devpost.com/rules . This repository does not claim a verified real AI call, a completed Sandbox payment, contest submission or prize.
+The project combines an existing SyntraVariga hash-chain component with an experimental invoice checking and Sandbox checkout demo. Exact prior creation dates and competition eligibility must be substantiated. The contest requires meaningful PayPal and AI use, a working demo, open-source repository and a YouTube demo; see https://paypalaihackathon.devpost.com/rules . The standalone Python prototype does not claim a verified live AI call or completed Sandbox payment. The submitted `ai-studio/` competition application separately documents live verification on the linked competition branch. No prize is claimed.
