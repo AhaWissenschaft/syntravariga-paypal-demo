@@ -563,6 +563,312 @@ describe('Hardening Suite v1.4 (SQLite ACID Co-Storage, Multi-Process Crash Reco
     );
     assert.equal(validCaptureWithCapCustomId.captureId, '3ND85370G4181781M');
     assert.equal(validCaptureWithCapCustomId.unit.custom_id, validHash);
+
+    // 4g. Reject contradictory unit vs capture custom_id or unit vs capture amount
+    const altHash = 'b'.repeat(64);
+    assert.throws(
+      () =>
+        verifyStrictPayPalCapturePayload(
+          {
+            id: 'SB-ORD-12345',
+            status: 'COMPLETED',
+            purchase_units: [
+              {
+                custom_id: validHash,
+                payments: {
+                  captures: [
+                    {
+                      id: '3ND85370G4181781M',
+                      status: 'COMPLETED',
+                      custom_id: altHash,
+                      amount: { currency_code: 'EUR', value: '119.00' },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            expectedOrderId: 'SB-ORD-12345',
+            expectedReceiptHash: validHash,
+            expectedAmountEur: '119.00',
+          }
+        ),
+      /custom_id is missing or does not match verified receipt_hash/
+    );
+
+    assert.throws(
+      () =>
+        verifyStrictPayPalCapturePayload(
+          {
+            id: 'SB-ORD-12345',
+            status: 'COMPLETED',
+            purchase_units: [
+              {
+                custom_id: validHash,
+                amount: { currency_code: 'EUR', value: '99.00' },
+                payments: {
+                  captures: [
+                    {
+                      id: '3ND85370G4181781M',
+                      status: 'COMPLETED',
+                      amount: { currency_code: 'EUR', value: '119.00' },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            expectedOrderId: 'SB-ORD-12345',
+            expectedReceiptHash: validHash,
+            expectedAmountEur: '119.00',
+          }
+        ),
+      /purchase_unit\[0\] amount mismatch/
+    );
+  });
+
+  it('4h. captureOrder validates POST /capture BEFORE authoritative GET fallback and rejects GET/POST contradictions fail-closed', async () => {
+    const validHash = 'c'.repeat(64);
+    const otherOrderId = 'SB-ORD-98765';
+    const mgr = new PayPalSandboxManager({
+      PAYPAL_CLIENT_ID: 'sb-mock-client-1234567890',
+      PAYPAL_CLIENT_SECRET: 'sb-mock-secret-1234567890',
+      PAYPAL_API_BASE: 'https://api-m.sandbox.paypal.com',
+    });
+
+    const originalFetch = globalThis.fetch;
+    const jsonRes = (payload: unknown) =>
+      new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+    const approvedOrderPayload = {
+      id: otherOrderId,
+      status: 'APPROVED',
+      purchase_units: [
+        {
+          custom_id: validHash,
+          amount: { currency_code: 'EUR', value: '119.00' },
+        },
+      ],
+    };
+
+    try {
+      // (i) POST /capture omits custom_id cleanly, GET /orders/{id} confirms matching custom_id & captureId -> succeeds
+      let orderGetCount = 0;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.endsWith('/v1/oauth2/token')) {
+          return jsonRes({ access_token: 'mock-access-token' });
+        }
+        if (url.endsWith(`/v2/checkout/orders/${otherOrderId}`) && (init?.method ?? 'GET') === 'GET') {
+          orderGetCount += 1;
+          if (orderGetCount === 1) return jsonRes(approvedOrderPayload);
+          return jsonRes({
+            id: otherOrderId,
+            status: 'COMPLETED',
+            purchase_units: [
+              {
+                custom_id: validHash,
+                amount: { currency_code: 'EUR', value: '119.00' },
+                payments: {
+                  captures: [
+                    {
+                      id: '3ND85370G4181781M',
+                      status: 'COMPLETED',
+                      amount: { currency_code: 'EUR', value: '119.00' },
+                    },
+                  ],
+                },
+              },
+            ],
+          });
+        }
+        if (url.endsWith(`/v2/checkout/orders/${otherOrderId}/capture`) && init?.method === 'POST') {
+          return jsonRes({
+            id: otherOrderId,
+            status: 'COMPLETED',
+            purchase_units: [
+              {
+                payments: {
+                  captures: [
+                    {
+                      id: '3ND85370G4181781M',
+                      status: 'COMPLETED',
+                      amount: { currency_code: 'EUR', value: '119.00' },
+                    },
+                  ],
+                },
+              },
+            ],
+          });
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      }) as typeof fetch;
+
+      const captured = await mgr.captureOrder(otherOrderId, validHash, '119.00');
+      assert.equal(orderGetCount, 2);
+      assert.equal(captured.status, 'COMPLETED');
+      assert.equal(captured.purchase_units[0].custom_id, validHash);
+      assert.equal(captured.purchase_units[0].payments?.captures?.[0]?.id, '3ND85370G4181781M');
+
+      // (ii) POST /capture returns PENDING without custom_id -> MUST reject BEFORE post-capture GET runs
+      orderGetCount = 0;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.endsWith('/v1/oauth2/token')) return jsonRes({ access_token: 'mock-access-token' });
+        if (url.endsWith(`/v2/checkout/orders/${otherOrderId}`) && (init?.method ?? 'GET') === 'GET') {
+          orderGetCount += 1;
+          return jsonRes(orderGetCount === 1 ? approvedOrderPayload : { id: otherOrderId, status: 'COMPLETED' });
+        }
+        if (url.endsWith(`/v2/checkout/orders/${otherOrderId}/capture`) && init?.method === 'POST') {
+          return jsonRes({
+            id: otherOrderId,
+            status: 'PENDING',
+            purchase_units: [
+              {
+                payments: {
+                  captures: [
+                    {
+                      id: '3ND85370G4181781M',
+                      status: 'COMPLETED',
+                      amount: { currency_code: 'EUR', value: '119.00' },
+                    },
+                  ],
+                },
+              },
+            ],
+          });
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      }) as typeof fetch;
+
+      await assert.rejects(
+        () => mgr.captureOrder(otherOrderId, validHash, '119.00'),
+        /Capture response status is not COMPLETED/
+      );
+      assert.equal(orderGetCount, 1);
+
+      // (iii) POST /capture has CAP-1, GET /orders/{id} has CAP-2 -> rejects fail-closed with isAmbiguous = true
+      orderGetCount = 0;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.endsWith('/v1/oauth2/token')) return jsonRes({ access_token: 'mock-access-token' });
+        if (url.endsWith(`/v2/checkout/orders/${otherOrderId}`) && (init?.method ?? 'GET') === 'GET') {
+          orderGetCount += 1;
+          if (orderGetCount === 1) return jsonRes(approvedOrderPayload);
+          return jsonRes({
+            id: otherOrderId,
+            status: 'COMPLETED',
+            purchase_units: [
+              {
+                custom_id: validHash,
+                amount: { currency_code: 'EUR', value: '119.00' },
+                payments: {
+                  captures: [
+                    {
+                      id: '9XY85370G4181782N',
+                      status: 'COMPLETED',
+                      amount: { currency_code: 'EUR', value: '119.00' },
+                    },
+                  ],
+                },
+              },
+            ],
+          });
+        }
+        if (url.endsWith(`/v2/checkout/orders/${otherOrderId}/capture`) && init?.method === 'POST') {
+          return jsonRes({
+            id: otherOrderId,
+            status: 'COMPLETED',
+            purchase_units: [
+              {
+                payments: {
+                  captures: [
+                    {
+                      id: '3ND85370G4181781M',
+                      status: 'COMPLETED',
+                      amount: { currency_code: 'EUR', value: '119.00' },
+                    },
+                  ],
+                },
+              },
+            ],
+          });
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      }) as typeof fetch;
+
+      await assert.rejects(
+        () => mgr.captureOrder(otherOrderId, validHash, '119.00'),
+        (err: unknown) =>
+          err instanceof PayPalSandboxError &&
+          err.isAmbiguousNetworkState === true &&
+          /reconciliation mismatch/.test(err.message)
+      );
+
+      // (iv) Both POST /capture and GET /orders/{id} omit custom_id -> rejects fail-closed with isAmbiguous = true
+      orderGetCount = 0;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.endsWith('/v1/oauth2/token')) return jsonRes({ access_token: 'mock-access-token' });
+        if (url.endsWith(`/v2/checkout/orders/${otherOrderId}`) && (init?.method ?? 'GET') === 'GET') {
+          orderGetCount += 1;
+          if (orderGetCount === 1) return jsonRes(approvedOrderPayload);
+          return jsonRes({
+            id: otherOrderId,
+            status: 'COMPLETED',
+            purchase_units: [
+              {
+                amount: { currency_code: 'EUR', value: '119.00' },
+                payments: {
+                  captures: [
+                    {
+                      id: '3ND85370G4181781M',
+                      status: 'COMPLETED',
+                      amount: { currency_code: 'EUR', value: '119.00' },
+                    },
+                  ],
+                },
+              },
+            ],
+          });
+        }
+        if (url.endsWith(`/v2/checkout/orders/${otherOrderId}/capture`) && init?.method === 'POST') {
+          return jsonRes({
+            id: otherOrderId,
+            status: 'COMPLETED',
+            purchase_units: [
+              {
+                payments: {
+                  captures: [
+                    {
+                      id: '3ND85370G4181781M',
+                      status: 'COMPLETED',
+                      amount: { currency_code: 'EUR', value: '119.00' },
+                    },
+                  ],
+                },
+              },
+            ],
+          });
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      }) as typeof fetch;
+
+      await assert.rejects(
+        () => mgr.captureOrder(otherOrderId, validHash, '119.00'),
+        (err: unknown) =>
+          err instanceof PayPalSandboxError &&
+          err.isAmbiguousNetworkState === true &&
+          /custom_id is missing or does not match verified receipt_hash/.test(err.message)
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it('5. Exact Host & Origin Verification rejects arbitrary *.run.app, wrong scheme, and wrong port, allowing only exact configured matches', () => {

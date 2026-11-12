@@ -193,19 +193,22 @@ export function verifyStrictPayPalOrderPayload(
  * Requires exact Order ID, COMPLETED status, exactly 1 purchase_unit, matching custom_id,
  * and exactly 1 COMPLETED capture with matching EUR amount and non-empty capture ID.
  */
-export function verifyStrictPayPalCapturePayload(
+type StrictPayPalCaptureResult = {
+  orderId: string;
+  captureId: string;
+  unit: PayPalOrderPurchaseUnit;
+  links: PayPalLinkDescription[];
+};
+
+function verifyPayPalCapturePayloadCore(
   raw: Record<string, unknown>,
   expected: {
     expectedOrderId: string;
     expectedReceiptHash: string;
     expectedAmountEur: string;
-  }
-): {
-  orderId: string;
-  captureId: string;
-  unit: PayPalOrderPurchaseUnit;
-  links: PayPalLinkDescription[];
-} {
+  },
+  allowMissingCustomId: boolean
+): { result: StrictPayPalCaptureResult; hasExplicitCustomId: boolean } {
   if (!raw || typeof raw !== 'object') {
     throw new PayPalSandboxError('PayPal capture response is not a valid object');
   }
@@ -229,6 +232,22 @@ export function verifyStrictPayPalCapturePayload(
   if (!u || typeof u !== 'object') {
     throw new PayPalSandboxError('Capture purchase_unit[0] is missing');
   }
+  if (u.amount !== undefined) {
+    if (!u.amount || typeof u.amount !== 'object') {
+      throw new PayPalSandboxError('Capture purchase_unit[0].amount is invalid');
+    }
+    const unitAmount = u.amount as Record<string, unknown>;
+    if (unitAmount.currency_code !== 'EUR') {
+      throw new PayPalSandboxError(
+        `Capture purchase_unit[0] currency must be EUR (got '${String(unitAmount.currency_code)}')`
+      );
+    }
+    if (unitAmount.value !== expected.expectedAmountEur) {
+      throw new PayPalSandboxError(
+        `Capture purchase_unit[0] amount mismatch: expected '${expected.expectedAmountEur}', got '${String(unitAmount.value)}'`
+      );
+    }
+  }
   const payments = u.payments as Record<string, unknown> | undefined;
   const captures = payments?.captures;
   if (!Array.isArray(captures) || captures.length !== 1) {
@@ -249,13 +268,12 @@ export function verifyStrictPayPalCapturePayload(
   }
   if (capCustomId !== undefined && capCustomId !== expected.expectedReceiptHash) {
     throw new PayPalSandboxError(
-      'Capture purchase_unit[0].custom_id is missing or does not match verified receipt_hash'
+      'Capture record [0].custom_id is missing or does not match verified receipt_hash'
     );
   }
-  if (
-    unitCustomId !== expected.expectedReceiptHash &&
-    capCustomId !== expected.expectedReceiptHash
-  ) {
+  const hasExplicitCustomId =
+    unitCustomId === expected.expectedReceiptHash || capCustomId === expected.expectedReceiptHash;
+  if (!allowMissingCustomId && !hasExplicitCustomId) {
     throw new PayPalSandboxError(
       'Capture purchase_unit[0].custom_id is missing or does not match verified receipt_hash'
     );
@@ -285,27 +303,41 @@ export function verifyStrictPayPalCapturePayload(
 
   const links = Array.isArray(raw.links) ? (raw.links as PayPalLinkDescription[]) : [];
   return {
-    orderId: expected.expectedOrderId,
-    captureId: cap.id,
-    unit: {
-      amount: { currency_code: 'EUR', value: expected.expectedAmountEur },
-      custom_id: expected.expectedReceiptHash,
-      payments: {
-        captures: [
-          {
-            id: cap.id,
-            status: 'COMPLETED',
-            amount: { currency_code: 'EUR', value: expected.expectedAmountEur },
-            create_time:
-              typeof cap.create_time === 'string' && cap.create_time
-                ? cap.create_time
-                : new Date().toISOString(),
-          },
-        ],
+    hasExplicitCustomId,
+    result: {
+      orderId: expected.expectedOrderId,
+      captureId: cap.id,
+      unit: {
+        amount: { currency_code: 'EUR', value: expected.expectedAmountEur },
+        custom_id: hasExplicitCustomId ? expected.expectedReceiptHash : '',
+        payments: {
+          captures: [
+            {
+              id: cap.id,
+              status: 'COMPLETED',
+              amount: { currency_code: 'EUR', value: expected.expectedAmountEur },
+              create_time:
+                typeof cap.create_time === 'string' && cap.create_time
+                  ? cap.create_time
+                  : new Date().toISOString(),
+            },
+          ],
+        },
       },
+      links,
     },
-    links,
   };
+}
+
+export function verifyStrictPayPalCapturePayload(
+  raw: Record<string, unknown>,
+  expected: {
+    expectedOrderId: string;
+    expectedReceiptHash: string;
+    expectedAmountEur: string;
+  }
+): StrictPayPalCaptureResult {
+  return verifyPayPalCapturePayloadCore(raw, expected, false).result;
 }
 
 async function requestLivePayPalSandbox(
@@ -639,28 +671,53 @@ export class PayPalSandboxManager {
         requestId
       );
 
-      // Live PayPal POST /capture often returns custom_id inside payments.captures[0] instead of
-      // purchase_units[0]. If neither carries custom_id in the POST /capture body, query the authoritative
-      // GET /v2/checkout/orders/{id} record rather than abandoning a completed capture into manual lock.
-      const captureUnits = Array.isArray(rawCapture.purchase_units)
-        ? (rawCapture.purchase_units as Array<Record<string, unknown>>)
-        : [];
-      const firstUnit = captureUnits[0];
-      const firstPayments = firstUnit?.payments as Record<string, unknown> | undefined;
-      const firstCapture = Array.isArray(firstPayments?.captures)
-        ? (firstPayments.captures as Array<Record<string, unknown>>)[0]
-        : undefined;
-      const hasServerReturnedCustomId =
-        firstUnit?.custom_id !== undefined || firstCapture?.custom_id !== undefined;
-      const capturePayload = hasServerReturnedCustomId
-        ? rawCapture
-        : await requestLivePayPalSandbox('GET', `/v2/checkout/orders/${orderId}`, resolvedEnv);
-
-      const verifiedCapture = verifyStrictPayPalCapturePayload(capturePayload, {
+      const expectedCapture = {
         expectedOrderId: orderId,
         expectedReceiptHash: receiptHash,
         expectedAmountEur: expectedVerifiedAmountEur,
-      });
+      };
+      // Always validate raw POST /capture strictly first (allowing only an omitted custom_id before GET lookup)
+      // so contradictory status, amount, capture id, or mismatched custom_id fields cannot be bypassed.
+      const postVerified = verifyPayPalCapturePayloadCore(rawCapture, expectedCapture, true);
+
+      let verifiedCapture: StrictPayPalCaptureResult;
+      if (postVerified.hasExplicitCustomId) {
+        verifiedCapture = postVerified.result;
+      } else {
+        // POST /capture succeeded on PayPal without echoing custom_id; fetch authoritative GET /orders/{id}
+        // and keep any follow-up failure/contradiction ambiguous so state locks fail-closed.
+        let authoritativeOrder: Record<string, unknown>;
+        try {
+          authoritativeOrder = await requestLivePayPalSandbox(
+            'GET',
+            `/v2/checkout/orders/${orderId}`,
+            resolvedEnv
+          );
+        } catch (err) {
+          throw new PayPalSandboxError(
+            err instanceof Error
+              ? err.message
+              : 'PayPal authoritative order lookup failed after capture',
+            true
+          );
+        }
+
+        try {
+          const authVerified = verifyStrictPayPalCapturePayload(authoritativeOrder, expectedCapture);
+          if (authVerified.captureId !== postVerified.result.captureId) {
+            throw new PayPalSandboxError(
+              `PayPal capture reconciliation mismatch: POST returned capture '${postVerified.result.captureId}', GET returned '${authVerified.captureId}'`,
+              true
+            );
+          }
+          verifiedCapture = authVerified;
+        } catch (err) {
+          if (err instanceof PayPalSandboxError) {
+            throw new PayPalSandboxError(err.message, true);
+          }
+          throw err;
+        }
+      }
 
       return {
         id: verifiedCapture.orderId,

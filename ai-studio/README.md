@@ -30,19 +30,19 @@ Small businesses and freelancers often inspect incoming supplier invoices manual
 
 | Component | Responsibility & Strict Boundary |
 |---|---|
-| **1. Invoice Field Proposal (`POST /api/ai/extract`)** | Proposes structured fields from free-form fictitious invoice text and flags missing/ambiguous totals. **Privacy Default:** Runs **100% locally via a deterministic regex parser (not AI)** unless the user explicitly checks the consent box to transmit the fictitious demo text to Google Gemini (`gemini-3.8-flash`). Any model error or 15s timeout falls back cleanly and surfaces in `external_ai_error`. |
+| **1. Invoice Field Proposal (`POST /api/ai/extract`)** | Proposes structured fields from free-form fictitious invoice text and flags missing/ambiguous totals. **Privacy Default:** Runs **100% locally via a deterministic regex parser (not AI)** unless the user explicitly checks the consent box to transmit the fictitious demo text to Google Gemini (configured `gemini-3.8-flash` primary with automatic Flash failover—verified live on `gemini-3.5-flash-lite`). Any model error or timeout falls back cleanly and surfaces in `external_ai_error`. |
 | **2. Human Inspection & Confirmation** | A human reviewer inspects, edits, and confirms the proposed fields. Any subsequent edit immediately invalidates the active verification receipt. |
 | **3. Deterministic Verification Rules (`invoiceGuard.ts`)** | Evaluates confirmed fields using integer-cent arithmetic (`Net + Tax === Gross === Amount`), Unicode `NFKC` normalization, and optional SHA-256 duplicate-invoice detection (`DUPLICATE_INVOICE`). Solely decides `FIELDS_CONSISTENT` vs. `REVIEW_REQUIRED`. |
-| **4. Zero-PII Finding Code Explainer (`POST /api/ai/explain`)** | Runs a deterministic local rule dictionary (not AI) by default. Only when the user explicitly opts in (`allow_external_ai: true`) does it transmit `{ status, finding_codes }` (never raw invoice fields) to Google Gemini (`gemini-3.8-flash`). Server-enforced contract locks `finding_codes` and appends `boundary_disclaimer`. |
+| **4. Zero-PII Finding Code Explainer (`POST /api/ai/explain`)** | Runs a deterministic local rule dictionary (not AI) by default. Only when the user explicitly opts in (`allow_external_ai: true`) does it transmit `{ status, finding_codes }` (never raw invoice fields) to Google Gemini (`gemini-3.8-flash` primary / Flash failover). Server-enforced contract locks `finding_codes` and appends `boundary_disclaimer`. |
 | **5. Transactional SQLite Ledger & Payment Co-Storage (`persistentStore.ts`)** | Stores `ledger_events` and `payment_records` together in SQLite (`node:sqlite`, `WAL`, `synchronous=FULL`, `BEGIN IMMEDIATE`). Server-side integrity checks verify every entry using native `node:crypto` SHA-256 (matching RFC 8785 canonical JSON). Supports **Resume / Inspect** of persisted records across reloads and restarts. On startup, `recoverInFlightRecordsOnStartup()` transitions interrupted `RESERVED_ORDER` or `CAPTURE_PENDING` records to `UNKNOWN_RECONCILIATION_REQUIRED`. |
 | **6. Single-Instance Process Ownership Lock (`startServer`)** | Acquires `<sqliteDbPath>.server.pid` (`acquireSingleInstanceServerLock`) at startup so only **one Express process** runs per SQLite database file, preventing crash recovery from falsely flagging another active process's in-flight payments. |
-| **7. Strict PayPal Response Validation (`paypalSandbox.ts`)** | Enforces `https://api-m.sandbox.paypal.com`, exact Order ID, expected status (`CREATED`, `APPROVED`, `COMPLETED`), **exactly one** `purchase_unit`, `custom_id === receipt_hash`, `currency_code === 'EUR'`, `value === verified_amount_eur`, and **exactly one** `COMPLETED` capture record. |
+| **7. Strict PayPal Response Validation (`paypalSandbox.ts`)** | Enforces `https://api-m.sandbox.paypal.com`, exact Order ID, expected status (`CREATED`, `APPROVED`, `COMPLETED`), **exactly one** `purchase_unit`, matching `custom_id === receipt_hash` (on `purchase_units[0]` or `payments.captures[0]`, rejecting mismatches), `currency_code === 'EUR'`, `value === verified_amount_eur` (on both unit amount when present and capture amount), and **exactly one** `COMPLETED` capture record. Raw `POST /capture` is strictly validated **before** querying `GET /v2/checkout/orders/{id}` when `custom_id` is omitted, and any capture ID mismatch or lookup failure locks fail-closed (`isAmbiguousNetworkState = true`). |
 | **8. Exact Host & Origin Validation (`verifyExactHostAndOrigin`)** | Validates `Host` and `Origin` headers including scheme (`http:` / `https:`), hostname, and port (`:3000`). Wildcard `*.run.app` domains are rejected unless explicitly matching `APP_URL` or `TRUSTED_PREVIEW_ORIGIN`. |
 | **9. Isolated Negative Self-Test (`POST /api/redteam/isolated`)** | Executes 4 isolated negative checks in a temporary SQLite directory mapped to HTTP 403/400/409 equivalents—zero external network calls and zero main-ledger mutations. |
 
 ### Pre-Existing vs. Hackathon Work Attribution
 - **Pre-existing SyntraVariga components (prior to hackathon submission period):** Core cryptographic hash-chain and contract primitives (`aha_lab/ledger.py`, `aha_lab/contracts.py`), canonical JSON test vectors, and the older Python snapshot in `reference_python/`.
-- **Hackathon-period development & hardening (`ai-studio/`):** React + TypeScript Jury UI (`src/App.tsx`, `src/components/`), invoice extraction/guard contracts & batch sample demo, Zero-PII Gemini explainer contract & automatic Flash fallback resilience (`AQ.*` & `AIza*` keys), SQLite ACID payment co-storage & single-instance PID lock, strict single-unit PayPal Sandbox REST/protocol state machine, Express security server (`server.ts`), and the 50-test TypeScript hardening & multi-process test suite.
+- **Hackathon-period development & hardening (`ai-studio/`):** React + TypeScript Jury UI (`src/App.tsx`, `src/components/`), invoice extraction/guard contracts & batch sample demo, Zero-PII Gemini explainer contract & automatic Flash fallback resilience (`AQ.*` & `AIza*` keys), SQLite ACID payment co-storage & single-instance PID lock, strict single-unit PayPal Sandbox REST/protocol state machine, Express security server (`server.ts`), and the 51-test TypeScript hardening & multi-process test suite.
 
 ### Explicit Limitations: What This Prototype Does NOT Claim
 - **No Proof of Invoice Authenticity or Fraud Absence:** `FIELDS_CONSISTENT` only means entered values satisfy the formal arithmetic, supplier comparison, and duplicate rules. Discrepancy sample amounts are not proven financial savings or detected fraud.
@@ -57,7 +57,7 @@ Small businesses and freelancers often inspect incoming supplier invoices manual
 
 ### Current Verification Status
 - **Automated Offline Verification (Node `v24.18.0` & Python `3.14`):**
-  - `npm test`: **50 TypeScript tests passing** (including multi-process child-process SQLite crash recovery, contention race checks, strict PayPal response validation, exact host/origin rejection, `AIza*`/`AQ.*` key validation, and single-instance server lock tests). Isolated unit/integration tests use mocked/simulated adapters even if `.env` is configured locally.
+  - `npm test`: **51 TypeScript tests passing** (including multi-process child-process SQLite crash recovery, contention race checks, strict PayPal response validation & POST-before-GET capture reconciliation contradiction guards, exact host/origin rejection, `AIza*`/`AQ.*` key validation, and single-instance server lock tests). Isolated unit/integration tests use mocked/simulated adapters even if `.env` is configured locally.
   - `npm run test:python`: **7 Python reference tests passing** (`reference_python/`).
   - `npm run lint`: **`tsc --noEmit` passing** with 0 errors.
   - `npm run build`: **Vite production build passing** with 0 warnings.
@@ -94,7 +94,7 @@ PAYPAL_API_BASE="https://api-m.sandbox.paypal.com"
 
 ### Running All Automated Tests & Build Checks
 ```bash
-npm test             # 49 TypeScript kernel, SQLite ACID, crash recovery & hardening tests
+npm test             # 51 TypeScript kernel, SQLite ACID, crash recovery & hardening tests
 npm run test:python  # 7 earlier Python reference tests
 npm run lint         # TypeScript strict typecheck (tsc --noEmit)
 npm run build        # Vite production bundle
