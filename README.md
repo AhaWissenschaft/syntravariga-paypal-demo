@@ -2,6 +2,18 @@
 
 AhaWissenschaft · SyntraVariga
 
+> [!IMPORTANT]
+> **PayPal AI Hackathon Jury Notice — Submitted Application & Links**
+>
+> The submitted React + TypeScript + Express + SQLite competition web application (**SyntraVariga Invoice & Payment Guard**, `ai-studio/`) lives on branch **[`feature/invoice-guard-public`](https://github.com/AhaWissenschaft/syntravariga-paypal-demo/tree/feature/invoice-guard-public)**. This default `main` branch intentionally preserves the earlier standalone Python prototype documented below.
+>
+> - **Competition Web App (`ai-studio/`):** https://github.com/AhaWissenschaft/syntravariga-paypal-demo/tree/feature/invoice-guard-public/ai-studio
+> - **Submitted GitHub Branch (`feature/invoice-guard-public`):** https://github.com/AhaWissenschaft/syntravariga-paypal-demo/tree/feature/invoice-guard-public
+> - **Demo Video (YouTube, 2:44):** https://youtu.be/GuKfCt4Cmb8
+> - **Official Devpost Submission:** https://devpost.com/software/syntravariga-invoice-payment-guard
+
+---
+
 Experimental local prototype. It proposes fields from fictional invoice text, compares user-confirmed fields with expected order data and offers a PayPal Sandbox-only checkout. It is not a fraud detector, identity check, production payment system or proof that an invoice is authentic.
 
 ## Status
