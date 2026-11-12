@@ -1,5 +1,8 @@
 # SyntraVariga Invoice & Payment Guard (AhaWissenschaft)
 
+> **SyntraVariga helps small businesses review supplier invoices before paying.**  
+> AI proposes invoice fields, a person confirms them, and deterministic checks keep PayPal Sandbox checkout locked when the confirmed data fails the configured checks. Each review and payment step is recorded in an auditable ledger.
+
 **PayPal AI Hackathon Candidate (`ai-studio/`) — Branch [`feature/invoice-guard-public`](https://github.com/AhaWissenschaft/syntravariga-paypal-demo/tree/feature/invoice-guard-public)**  
 **License:** MIT (see [`LICENSE`](../LICENSE) and [`ai-studio/LICENSE`](LICENSE))  
 **Scope:** PayPal Sandbox & Demo Only · Fictitious Invoice Data · Human-in-the-Loop Verification

@@ -2,6 +2,9 @@
 
 AhaWissenschaft · SyntraVariga
 
+> **SyntraVariga helps small businesses review supplier invoices before paying.**  
+> AI proposes invoice fields, a person confirms them, and deterministic checks keep PayPal Sandbox checkout locked when the confirmed data fails the configured checks. Each review and payment step is recorded in an auditable ledger.
+
 Experimental local prototype. It proposes fields from fictional invoice text, compares user-confirmed fields with expected order data and offers a PayPal Sandbox-only checkout. It is not a fraud detector, identity check, production payment system or proof that an invoice is authentic.
 
 ## Status
